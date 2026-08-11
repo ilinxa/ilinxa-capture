@@ -1,4 +1,8 @@
 <!-- wl:readme.hero -->
+<p align="center">
+  <img src="assets/brand/banner.png" alt="ilinxa capture — video frames to LLM grid sheets" width="880">
+</p>
+
 # ilinxa capture
 
 **Video frame extraction & composition service for AI vision pipelines.**

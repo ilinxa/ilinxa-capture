@@ -10,24 +10,24 @@ docs:
   readme:
     f: README.md
     v: 0.1.0
-    h: a121f9
+    h: 2e2b74
     ok: true
     blocks:
-      hero:         {l: [1, 11]}
-      about:        {l: [13, 26]}
-      toc:          {l: [28, 46]}
-      features:     {l: [48, 67]}
-      quickstart:   {l: [69, 93]}
-      usage:        {l: [95, 183]}
-      config:       {l: [185, 208]}
-      architecture: {l: [210, 269]}
-      development:  {l: [271, 299]}
-      testing:      {l: [301, 317]}
-      security:     {l: [319, 332], deps: [security.report]}
-      faq:          {l: [334, 360]}
-      contributing: {l: [362, 368]}
-      support:      {l: [370, 377], deps: [support.routes]}
-      license:      {l: [379, 383]}
+      hero:         {l: [1, 15]}
+      about:        {l: [17, 30]}
+      toc:          {l: [32, 50]}
+      features:     {l: [52, 71]}
+      quickstart:   {l: [73, 97]}
+      usage:        {l: [99, 187]}
+      config:       {l: [189, 212]}
+      architecture: {l: [214, 273]}
+      development:  {l: [275, 303]}
+      testing:      {l: [305, 321]}
+      security:     {l: [323, 336], deps: [security.report]}
+      faq:          {l: [338, 364]}
+      contributing: {l: [366, 372]}
+      support:      {l: [374, 381], deps: [support.routes]}
+      license:      {l: [383, 387]}
   changelog:
     f: CHANGELOG.md
     v: 0.1.0
@@ -96,7 +96,8 @@ docs:
 # Present but unblocked (validated by presence, not wikilinks):
 #   .github/ISSUE_TEMPLATE/bug_report.yml, feature_request.yml, config.yml
 #   .github/PULL_REQUEST_TEMPLATE.md
-#   assets/brand/palette.md  (banner.png + social-preview.png pending — image service)
+#   assets/brand/: palette.md, banner.png (1280x320), social-preview.png (1280x640)
 
 log:
+  - "2026-08-11 0.1.0 readme.hero banner wired in; brand assets added"
   - "2026-08-11 0.1.0 bootstrap: index created, anchors added, OSS docs generated"
