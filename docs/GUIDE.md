@@ -1,3 +1,4 @@
+<!-- wl:guide.overview -->
 # ilinxa capture Configuration & Usage Guide
 
 This guide covers all three ilinxa capture interfaces in detail: the Web UI, MCP Server, and REST API. For project overview and setup instructions, see the [README](../README.md).
@@ -29,6 +30,9 @@ This guide covers all three ilinxa capture interfaces in detail: the Web UI, MCP
 
 ---
 
+<!-- /wl -->
+
+<!-- wl:guide.webui -->
 # Web UI
 
 The Web UI provides a visual, step-by-step workflow for extracting frames and composing grid sheets.
@@ -227,6 +231,9 @@ A visual grid displays all composed sheets. Click any sheet to open the full-siz
 
 ---
 
+<!-- /wl -->
+
+<!-- wl:guide.mcp -->
 # MCP Server
 
 ## Overview
@@ -742,6 +749,9 @@ MCP tools never throw exceptions. Errors are returned as structured values:
 
 ---
 
+<!-- /wl -->
+
+<!-- wl:guide.rest -->
 # REST API
 
 ## API Overview
@@ -1606,3 +1616,5 @@ curl -X POST http://localhost:3000/api/v1/video/download \
 
 curl -o audio.mp3 http://localhost:3000/api/v1/jobs/cap_mno345/video
 ```
+<!-- /wl -->
+

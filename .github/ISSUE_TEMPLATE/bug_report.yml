@@ -1,0 +1,46 @@
+name: Bug report
+description: Something isn't working as documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. A minimal reproduction is the
+        single most useful thing you can give us.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: ilinxa capture version (or commit SHA) you're running.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and version. Include Node, FFmpeg, and yt-dlp versions if relevant.
+      placeholder: "Ubuntu 24.04 · Node 22.5 · ffmpeg 7.0 · yt-dlp 2025.07"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Include the exact error and relevant logs (run with LOG_LEVEL=debug).
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The exact command or request, plus a sample input if possible.
+      render: shell
+    validations:
+      required: true

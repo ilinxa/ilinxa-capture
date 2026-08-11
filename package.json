@@ -19,12 +19,27 @@
   "keywords": [
     "video",
     "frame-extraction",
+    "ffmpeg",
+    "yt-dlp",
+    "sharp",
     "ai",
     "vision",
+    "llm",
+    "mcp",
+    "mcp-server",
     "fastify",
-    "mcp"
+    "contact-sheet"
   ],
   "license": "Apache-2.0",
+  "author": "ilinxa",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ilinxa/ilinxa-capture.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ilinxa/ilinxa-capture/issues"
+  },
+  "homepage": "https://github.com/ilinxa/ilinxa-capture#readme",
   "dependencies": {
     "@fastify/cors": "^11.2.0",
     "@fastify/error": "^4.2.0",

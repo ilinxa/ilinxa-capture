@@ -1,3 +1,4 @@
+<!-- wl:readme.hero -->
 # ilinxa capture
 
 **Video frame extraction & composition service for AI vision pipelines.**
@@ -7,20 +8,24 @@
 ![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)
 ![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP%20%2B%20stdio-purple)
+<!-- /wl -->
 
-ilinxa capture turns videos into **grid sheets** (contact sheets) that multimodal
-LLMs can read efficiently: it extracts frames at a configurable FPS, then
-composes them into 1×1, 2×2, or 4×4 grids with optional frame-number and
-timestamp overlays. One core engine, three interfaces:
+<!-- wl:readme.about -->
+ilinxa capture extracts video frames and tiles them into 2×2 or 4×4 grid sheets
+a multimodal LLM can read in one image — self-hosted, via a REST API, a Web UI,
+or an MCP server. Instead of sending a model dozens of separate frames, you send
+one contact sheet, with optional frame-number and timestamp overlays so the
+model can still reason about time. One core engine backs all three interfaces,
+reachable however your pipeline prefers:
 
 | Interface | For | Entry point |
 |---|---|---|
 | **REST API** | Scripts, services, pipelines | `/api/v1` |
 | **Web UI** | Interactive use | `/` (3-step wizard) |
 | **MCP server** | AI agents / MCP clients | stdio + Streamable HTTP |
+<!-- /wl -->
 
----
-
+<!-- wl:readme.toc -->
 ## Table of contents
 
 - [Features](#features)
@@ -34,9 +39,13 @@ timestamp overlays. One core engine, three interfaces:
 - [Development](#development)
 - [Testing](#testing)
 - [Security model](#security-model)
+- [FAQ](#faq)
 - [Contributing](#contributing)
+- [Support](#support)
 - [License](#license)
+<!-- /wl -->
 
+<!-- wl:readme.features -->
 ## Features
 
 - **Frame extraction** at 1–30 FPS via FFmpeg
@@ -55,7 +64,9 @@ timestamp overlays. One core engine, three interfaces:
   memory
 - **Self-maintaining storage**: TTL-based cleanup of finished jobs and
   orphaned temp files; job state recovers across restarts (no database)
+<!-- /wl -->
 
+<!-- wl:readme.quickstart -->
 ## Quick start
 
 ### Docker (recommended)
@@ -70,7 +81,7 @@ all served from the same port. FFmpeg and yt-dlp are included in the image.
 
 ### Local
 
-Requirements: **Node 22+**, **FFmpeg** (with ffprobe) and **yt-dlp** on `PATH`.
+Requires **Node 22+**, **FFmpeg** (with ffprobe) and **yt-dlp** on `PATH`.
 
 ```bash
 npm ci
@@ -79,7 +90,9 @@ npm start                  # serves API + built UI on :3000
 ```
 
 For development with hot reload, see [Development](#development).
+<!-- /wl -->
 
+<!-- wl:readme.usage -->
 ## Usage
 
 ### REST API
@@ -167,7 +180,9 @@ ilinxa capture exposes its tools to any
 (`MCP_SESSION_TTL`).
 
 Setup walkthroughs for both transports: [docs/GUIDE.md](docs/GUIDE.md#mcp-server).
+<!-- /wl -->
 
+<!-- wl:readme.config -->
 ## Configuration
 
 All configuration is via environment variables (validated at startup — the
@@ -190,29 +205,33 @@ to `.env` to get started.
 | `MCP_SESSION_TTL` | int | `1800` | Idle MCP HTTP session lifetime in seconds |
 | `UI_DIR` | string | `./ui/dist` | Built Web UI assets |
 | `S3_*` | — | — | S3 credentials/bucket (required when `STORAGE_MODE=s3`) |
+<!-- /wl -->
 
+<!-- wl:readme.architecture -->
 ## Architecture
 
+```mermaid
+%%{init: {'theme':'neutral','themeVariables':{'primaryColor':'#CC785C','lineColor':'#6B7280'}}}%%
+flowchart TD
+    UI["Web UI · React 19"]
+    MCPS["MCP · stdio"]
+    HTTP["MCP HTTP · /mcp"]
+    API["REST API · Fastify 5"]
+    CORE["Core engine<br/>job queue · storage · cleanup"]
+    FF["FFmpeg"]
+    SH["Sharp"]
+    YT["yt-dlp"]
+    UI --> API
+    MCPS --> API
+    HTTP --> API
+    API --> CORE
+    CORE --> FF
+    CORE --> SH
+    CORE --> YT
 ```
-                    ┌───────────┐
-                    │  Web UI   │
-                    │ React 19  │
-                    └─────┬─────┘
-                          │
-  ┌──────────┐     ┌──────┴──────┐     ┌────────────┐
-  │   MCP    │     │  REST API   │     │  MCP HTTP  │
-  │  stdio   ├────▶│  Fastify 5  │◀────┤    /mcp    │
-  └──────────┘     └──────┬──────┘     └────────────┘
-                          │
-                   ┌──────┴──────┐
-                   │ Core engine │   job queue · storage · cleanup
-                   └──────┬──────┘
-                          │
-              ┌───────────┼───────────┐
-         ┌────┴────┐ ┌────┴───┐ ┌─────┴────┐
-         │ FFmpeg  │ │ Sharp  │ │  yt-dlp  │
-         └─────────┘ └────────┘ └──────────┘
-```
+
+*One core engine sits behind three thin protocol adapters and shells out to
+FFmpeg, Sharp, and yt-dlp.*
 
 Design decisions worth knowing:
 
@@ -247,7 +266,9 @@ ui/src/
 ├── stores/           # Zustand (client state)
 ├── hooks/ lib/ types/ styles/
 ```
+<!-- /wl -->
 
+<!-- wl:readme.development -->
 ## Development
 
 ```bash
@@ -275,7 +296,9 @@ Conventions: strict TypeScript everywhere (`noUncheckedIndexedAccess`), ESM
 only, Zod validation at every boundary, Pino logging (stdout is reserved for
 JSON-RPC on the MCP stdio transport). UI: named exports, Zustand for client
 state, TanStack Query for server state — never mixed.
+<!-- /wl -->
 
+<!-- wl:readme.testing -->
 ## Testing
 
 Three tiers, all run in CI:
@@ -291,7 +314,9 @@ npm test -- --run                 # unit
 npm run test:integration -- --run # integration (needs FFmpeg on PATH)
 cd ui && npm test -- --run        # UI
 ```
+<!-- /wl -->
 
+<!-- wl:readme.security -->
 ## Security model
 
 ilinxa capture is designed for **localhost / trusted-network use** and ships
@@ -303,11 +328,56 @@ job's own directory with path-traversal protection. For anything
 internet-facing, put it behind a gateway that provides authentication, rate
 limiting, and URL allow-listing.
 
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+<!-- /wl -->
+
+<!-- wl:readme.faq -->
+## FAQ
+
+**How is this different from sending raw video frames to an LLM?**
+A grid sheet packs many frames into one image, so the model reads a whole clip
+in a single request instead of dozens — fewer tokens, fewer round trips.
+Optional timestamp and frame-number overlays keep the model able to reason
+about *when* something happens.
+
+**Do I need FFmpeg and yt-dlp installed?**
+For a local install, yes — both must be on your `PATH` (FFmpeg for extraction,
+yt-dlp for URL downloads). The Docker image bundles them, so `docker run` needs
+nothing else.
+
+**Can I use it without the Web UI — just the API or an MCP agent?**
+Yes. The REST API, Web UI, and MCP server are three independent front doors to
+the same engine; run only the one you need.
+
+**Which video sources can it pull from?**
+Local uploads, direct video URLs, HLS streams (including `.m3u8` links
+discovered inside a web page), and any of the 1,000+ sites yt-dlp supports.
+
+**Is it safe to expose on the internet?**
+Not as-is. It has no authentication and will fetch any URL it's given. Keep it
+on localhost or a trusted network, or put it behind a gateway — see the
+[security model](#security-model).
+<!-- /wl -->
+
+<!-- wl:readme.contributing -->
 ## Contributing
 
-Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
-development workflow, test requirements, and PR guidelines.
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md "wl:contributing.intro")
+for the development workflow, test requirements, and PR guidelines. By
+participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
+<!-- /wl -->
 
+<!-- wl:readme.support -->
+## Support
+
+Questions and usage help go in
+[GitHub Discussions](https://github.com/ilinxa/ilinxa-capture/discussions); bugs
+and feature requests go in [Issues](https://github.com/ilinxa/ilinxa-capture/issues/new/choose).
+See [SUPPORT.md](SUPPORT.md) for the full routing.
+<!-- /wl -->
+
+<!-- wl:readme.license -->
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+<!-- /wl -->

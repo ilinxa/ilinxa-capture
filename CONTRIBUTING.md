@@ -1,8 +1,11 @@
+<!-- wl:contributing.intro -->
 # Contributing to ilinxa capture
 
 Thanks for your interest in contributing! This document covers the local
 setup, project conventions, and the pull-request workflow.
+<!-- /wl -->
 
+<!-- wl:contributing.setup -->
 ## Prerequisites
 
 - **Node.js 22+**
@@ -36,7 +39,9 @@ npm run dev          # Vite on :5173, proxies /api to :3000
 
 The golden rule: **REST and MCP layers stay thin** — new behavior belongs in
 `src/core/` with the interface layers only translating protocols.
+<!-- /wl -->
 
+<!-- wl:contributing.conventions -->
 ## Conventions
 
 ### Backend
@@ -60,7 +65,9 @@ The golden rule: **REST and MCP layers stay thin** — new behavior belongs in
 - Tailwind v4 semantic tokens (`bg-background`, `text-brand`, …) — no
   hardcoded color utilities.
 - Query priority in tests: `getByRole` > `getByLabelText` > `getByText`.
+<!-- /wl -->
 
+<!-- wl:contributing.testing -->
 ## Testing
 
 Every change must land **with its tests** — a fix without a regression test
@@ -83,7 +90,9 @@ Notes:
 - `app.inject()` does not reliably deliver streamed response bodies — test
   streaming endpoints through a real listener (see
   `src/integration/pipeline.integration.test.ts`) or assert on mocks.
+<!-- /wl -->
 
+<!-- wl:contributing.pr -->
 ## Pull requests
 
 1. Fork and create a feature branch from `main`.
@@ -93,16 +102,20 @@ Notes:
    e.g. `fix(api): …`).
 4. Make sure **all** gates above pass locally; CI runs them on every PR.
 5. Update documentation in the same PR when behavior changes
-   (`README.md`, `docs/GUIDE.md`, `.env.example`).
+   (`README.md`, `docs/GUIDE.md`, `.env.example`), and add a `CHANGELOG.md`
+   Unreleased entry for user-facing changes.
+<!-- /wl -->
 
+<!-- wl:contributing.issues -->
 ## Reporting issues
 
 Please include: what you ran (exact command / request), what you expected,
 what happened instead, OS + Node + FFmpeg versions, and relevant log output
-(`LOG_LEVEL=debug`). For security concerns, please do not open a public
-issue — contact the maintainers directly.
+(`LOG_LEVEL=debug`). For security concerns, do not open a public issue —
+follow [SECURITY.md](SECURITY.md).
 
 ## License
 
 By contributing, you agree that your contributions will be licensed under
 the [Apache License 2.0](LICENSE).
+<!-- /wl -->

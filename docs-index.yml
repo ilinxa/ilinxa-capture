@@ -1,0 +1,102 @@
+# public-doc index — read FIRST, fetch blocks by line range. Spec: .claude/skills/public-doc/references/index-spec.md
+v: 1
+repo: ilinxa-capture
+type: oss
+release: 0.1.0
+updated: 2026-08-11
+brand: assets/brand/
+
+docs:
+  readme:
+    f: README.md
+    v: 0.1.0
+    h: a121f9
+    ok: true
+    blocks:
+      hero:         {l: [1, 11]}
+      about:        {l: [13, 26]}
+      toc:          {l: [28, 46]}
+      features:     {l: [48, 67]}
+      quickstart:   {l: [69, 93]}
+      usage:        {l: [95, 183]}
+      config:       {l: [185, 208]}
+      architecture: {l: [210, 269]}
+      development:  {l: [271, 299]}
+      testing:      {l: [301, 317]}
+      security:     {l: [319, 332], deps: [security.report]}
+      faq:          {l: [334, 360]}
+      contributing: {l: [362, 368]}
+      support:      {l: [370, 377], deps: [support.routes]}
+      license:      {l: [379, 383]}
+  changelog:
+    f: CHANGELOG.md
+    v: 0.1.0
+    h: 5faf92
+    ok: true
+    blocks:
+      unreleased: {l: [8, 10]}
+      "0-1-0":    {l: [12, 35]}
+  contributing:
+    f: CONTRIBUTING.md
+    v: 0.1.0
+    h: "818577"
+    ok: true
+    blocks:
+      intro:       {l: [1, 6]}
+      setup:       {l: [8, 42]}
+      conventions: {l: [44, 68]}
+      testing:     {l: [70, 93]}
+      pr:          {l: [95, 107]}
+      issues:      {l: [109, 121]}
+  security:
+    f: SECURITY.md
+    v: 0.1.0
+    h: 6b00b9
+    ok: true
+    blocks:
+      report:   {l: [3, 16]}
+      versions: {l: [18, 27]}
+      scope:    {l: [29, 37]}
+  support:
+    f: SUPPORT.md
+    v: 0.1.0
+    h: 1b3be3
+    ok: true
+    blocks:
+      routes: {l: [3, 16], deps: [security.report]}
+  guide:
+    f: docs/GUIDE.md
+    v: 0.1.0
+    h: 4ef5a8
+    ok: true
+    blocks:
+      overview: {l: [1, 33]}
+      webui:    {l: [35, 234]}
+      mcp:      {l: [236, 752]}
+      rest:     {l: [754, 1619]}
+  code_of_conduct:
+    f: CODE_OF_CONDUCT.md
+    v: 0.1.0
+    h: bbeba2
+    ok: true
+    frozen: true    # Contributor Covenant 2.1 verbatim — never edited
+  license:
+    f: LICENSE
+    v: 0.1.0
+    h: cfc774
+    ok: true
+    frozen: true    # Apache-2.0 SPDX text — never edited
+  notice:
+    f: NOTICE
+    v: 0.1.0
+    h: 7627c3
+    ok: true
+    frozen: true
+
+# Present but unblocked (validated by presence, not wikilinks):
+#   .github/ISSUE_TEMPLATE/bug_report.yml, feature_request.yml, config.yml
+#   .github/PULL_REQUEST_TEMPLATE.md
+#   assets/brand/palette.md  (banner.png + social-preview.png pending — image service)
+
+log:
+  - "2026-08-11 0.1.0 bootstrap: index created, anchors added, OSS docs generated"

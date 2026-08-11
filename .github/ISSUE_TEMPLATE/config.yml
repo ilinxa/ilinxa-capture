@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and usage help
+    url: https://github.com/ilinxa/ilinxa-capture/discussions
+    about: Ask questions and get help in Discussions — not the issue tracker.
+  - name: Security vulnerability
+    url: https://github.com/ilinxa/ilinxa-capture/security/advisories/new
+    about: Report security issues privately. Please don't open a public issue.
