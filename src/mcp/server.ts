@@ -19,7 +19,7 @@ interface SessionEntry {
 export function createMcpServer(deps: ToolDeps): McpServer {
   const server = new McpServer({
     name: "ilinxa-capture",
-    version: "0.1.0",
+    version: "0.1.1",
   });
   registerTools(server, deps);
   return server;

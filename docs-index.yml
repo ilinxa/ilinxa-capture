@@ -2,7 +2,7 @@
 v: 1
 repo: ilinxa-capture
 type: oss
-release: 0.1.0
+release: 0.1.1
 updated: 2026-08-11
 brand: assets/brand/
 
@@ -30,12 +30,13 @@ docs:
       license:      {l: [383, 387]}
   changelog:
     f: CHANGELOG.md
-    v: 0.1.0
-    h: 5faf92
+    v: 0.1.1
+    h: 849bc2
     ok: true
     blocks:
       unreleased: {l: [8, 10]}
-      "0-1-0":    {l: [12, 35]}
+      "0-1-1":    {l: [12, 29]}
+      "0-1-0":    {l: [31, 54]}
   contributing:
     f: CONTRIBUTING.md
     v: 0.1.0
@@ -66,8 +67,8 @@ docs:
       routes: {l: [3, 16], deps: [security.report]}
   guide:
     f: docs/GUIDE.md
-    v: 0.1.0
-    h: 4ef5a8
+    v: 0.1.1
+    h: f95e59
     ok: true
     blocks:
       overview: {l: [1, 33]}
@@ -99,5 +100,7 @@ docs:
 #   assets/brand/: palette.md, banner.png (1280x320), social-preview.png (1280x640)
 
 log:
+  - "2026-08-11 0.1.1 guide.rest health example version bumped to 0.1.1"
+  - "2026-08-11 0.1.1 changelog.0-1-1 patch release; path traversal fix documented"
   - "2026-08-11 0.1.0 readme.hero banner wired in; brand assets added"
   - "2026-08-11 0.1.0 bootstrap: index created, anchors added, OSS docs generated"

@@ -9,6 +9,25 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 <!-- /wl -->
 
+<!-- wl:changelog.0-1-1 -->
+## [0.1.1] — 2026-08-11
+
+### Security
+
+- Fixed a path traversal in the file route on Linux and macOS. A request like
+  `GET /api/v1/files/:jobId/..\..\..\etc\passwd` escaped the job directory:
+  POSIX `path` does not treat `\` as a separator, so the payload stayed one
+  literal filename inside the job directory, satisfied the containment check,
+  and was then read from disk and returned. Backslashes are now normalized
+  before the path is resolved. Windows hosts were never affected, since `path`
+  there already splits on `\`.
+
+  Reaching it needs the ID of a completed job, so anyone who can create a job
+  could read any file the server process could read. Instances left on
+  localhost, as the README recommends, were reachable only from the host.
+  Upgrade if you published the port or put the service behind a proxy.
+<!-- /wl -->
+
 <!-- wl:changelog.0-1-0 -->
 ## [0.1.0] — 2026-08-11
 
@@ -34,5 +53,6 @@ Initial public release.
   (React 19), and an MCP server (stdio + Streamable HTTP) exposing eight tools.
 <!-- /wl -->
 
-[Unreleased]: https://github.com/ilinxa/ilinxa-capture/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ilinxa/ilinxa-capture/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ilinxa/ilinxa-capture/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ilinxa/ilinxa-capture/releases/tag/v0.1.0

@@ -16,7 +16,7 @@ export async function healthCheckHandler(
 ): Promise<void> {
   const response: HealthResponse = {
     status: "ok",
-    version: "0.1.0",
+    version: "0.1.1",
     uptime: process.uptime(),
     environment: process.env["NODE_ENV"] ?? "development",
   };
