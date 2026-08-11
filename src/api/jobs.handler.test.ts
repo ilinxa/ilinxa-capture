@@ -84,6 +84,29 @@ function createTestEnv(overrides?: Partial<Env>): Env {
   };
 }
 
+/**
+ * Polls a job's status endpoint until it reaches a terminal state
+ * ("completed" or "failed") or the timeout elapses, then returns the last
+ * response. Replaces fixed sleeps so background-job assertions don't race the
+ * event loop on slower runners.
+ */
+async function waitForJobStatus(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  pollUrl: string,
+  timeoutMs = 2000,
+) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const response = await app.inject({ method: "GET", url: pollUrl });
+    const body = JSON.parse(response.body) as Record<string, unknown>;
+    const status = body["status"];
+    if (status === "completed" || status === "failed" || Date.now() >= deadline) {
+      return response;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 describe("Job endpoints", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -112,10 +135,7 @@ describe("Job endpoints", () => {
       const pollUrl = createBody["poll_url"] as string;
 
       // Wait for background task to complete
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      // Should now be completed
-      const pollResponse = await app.inject({ method: "GET", url: pollUrl });
+      const pollResponse = await waitForJobStatus(app, pollUrl);
       expect(pollResponse.statusCode).toBe(200);
 
       const pollBody = JSON.parse(pollResponse.body) as Record<string, unknown>;
@@ -147,9 +167,7 @@ describe("Job endpoints", () => {
       const pollUrl = createBody["poll_url"] as string;
 
       // Wait for background task to fail
-      await new Promise((resolve) => setTimeout(resolve, 50));
-
-      const pollResponse = await app.inject({ method: "GET", url: pollUrl });
+      const pollResponse = await waitForJobStatus(app, pollUrl);
       expect(pollResponse.statusCode).toBe(200);
 
       const pollBody = JSON.parse(pollResponse.body) as Record<string, unknown>;
@@ -196,7 +214,7 @@ describe("Job endpoints", () => {
       const jobId = createBody["job_id"] as string;
 
       // Wait for completion
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await waitForJobStatus(app, `/api/v1/jobs/${jobId}`);
 
       // Delete the job
       const deleteResponse = await app.inject({
