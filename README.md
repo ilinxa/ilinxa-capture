@@ -32,6 +32,7 @@ reachable however your pipeline prefers:
 <!-- wl:readme.toc -->
 ## Table of contents
 
+- [Demo](#demo)
 - [Features](#features)
 - [Quick start](#quick-start)
 - [Usage](#usage)
@@ -47,6 +48,17 @@ reachable however your pipeline prefers:
 - [Contributing](#contributing)
 - [Support](#support)
 - [License](#license)
+<!-- /wl -->
+
+<!-- wl:readme.demo -->
+## Demo
+
+<p align="center">
+  <img src="assets/brand/demo.gif" alt="ilinxa capture demo — a video is extracted into frames and composed into a 4x4 grid sheet with per-frame timestamp overlays" width="880">
+</p>
+
+Video in, one grid sheet out — 16 frames tiled into a single 4×4 image with
+per-frame timestamp overlays, ready for a multimodal LLM. [Watch the clip](assets/brand/demo.mp4).
 <!-- /wl -->
 
 <!-- wl:readme.features -->
