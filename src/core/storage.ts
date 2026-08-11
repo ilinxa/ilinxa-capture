@@ -32,7 +32,12 @@ export class LocalStorage implements Storage {
 
   private resolveSecure(jobId: string, relativePath: string): string {
     const jobDir = this.getJobDir(jobId);
-    const resolved = normalize(join(jobDir, relativePath));
+    // Treat backslashes as separators regardless of platform. POSIX `path`
+    // (used on Linux, our Docker target) does not recognize "\" as a separator,
+    // so a Windows-style "..\..\" would otherwise slip past the traversal check
+    // as a single literal filename and bypass the guard.
+    const normalizedInput = relativePath.replace(/\\/g, "/");
+    const resolved = normalize(join(jobDir, normalizedInput));
     if (resolved !== jobDir && !resolved.startsWith(jobDir + sep)) {
       throw new ValidationError("Path traversal detected");
     }
