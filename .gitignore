@@ -29,3 +29,6 @@ Thumbs.db
 
 # Internal planning notes (not part of the public repo)
 docs/plans/
+
+# Local-only agent instructions
+CLAUDE.local.md
