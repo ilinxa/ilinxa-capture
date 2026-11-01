@@ -28,7 +28,8 @@ export function createDownloadHandler(jobManager: JobManager, storage: Storage) 
     const subDir = include === "all" ? undefined : (include as "frames" | "sheets");
     const files = await storage.listFiles(jobId, subDir);
     if (files.length === 0) {
-      throw new ValidationError(`No ${include} files found for job '${jobId}'`);
+      const what = include === "all" ? "" : `${include} `;
+      throw new ValidationError(`No ${what}files found for job '${jobId}'`);
     }
 
     // Create ZIP archive with fast compression (images already compressed)

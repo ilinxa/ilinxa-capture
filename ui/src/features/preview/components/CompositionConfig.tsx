@@ -106,7 +106,7 @@ export function CompositionConfig({
             className="w-32"
           />
           <p className="text-xs text-muted-foreground">
-            Used to calculate timestamps on each frame overlay
+            Only for frames with no recorded time. New jobs use each frame's real time
           </p>
         </div>
       )}

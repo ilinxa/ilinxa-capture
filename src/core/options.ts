@@ -270,7 +270,7 @@ export function videoDownloadOptionsShape(s: Scalars) {
     format_selector: formatSelectorSchema
       .optional()
       .describe(
-        "Advanced: raw yt-dlp format selector or HLS variant .m3u8 URL (overrides preset)",
+        "Advanced: raw yt-dlp format selector or HLS variant .m3u8 URL, instead of preset",
       ),
     merge_format: z
       .enum(["mp4", "webm", "mkv", "mp3"])

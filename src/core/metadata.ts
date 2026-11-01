@@ -165,7 +165,7 @@ function readFailure(
     ?.replace(/^\S+ exited with [^:]+: /, "");
   return new UnsupportedFormatError(
     `Not a readable video: ${reason}. Containers read: MP4, MOV, MKV, WebM, AVI, ` +
-      "MPEG-TS, MPEG-PS, FLV, WMV, Ogg, MXF, DV, and raw H.264, HEVC or MPEG video",
+      "MPEG-TS, MPEG-PS, FLV, WMV, Ogg, MXF, DV, IVF, and raw H.264, HEVC or MPEG video",
   );
 }
 

@@ -31,7 +31,7 @@ export interface AudioExtractionOptions {
 /** What the encoder takes. Any other rate only fails once it opens. */
 export const SAMPLE_RATES: Partial<Record<AudioFormat, number[]>> = {
   mp3: [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000],
-  m4a: [7350, 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000],
+  m4a: [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000],
 };
 
 export interface AudioExtractionResult {
