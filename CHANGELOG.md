@@ -10,7 +10,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 <!-- /wl -->
 
 <!-- wl:changelog.0-2-0 -->
-## [0.2.0] — 2026-11-01
+## [0.2.0] — 2026-11-02
 
 This release makes the tool safe by default on a local machine, and ready for
 film-length work. Several defaults change, so read **Changed** before upgrading.
