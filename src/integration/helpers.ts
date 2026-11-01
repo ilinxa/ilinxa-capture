@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AddressInfo } from "node:net";
 import type { FastifyInstance } from "fastify";
+import sharp from "sharp";
 import { buildApp } from "../app.js";
 import type { Env } from "../lib/env.js";
 import { createTestEnv } from "../test/env.js";
@@ -83,6 +84,49 @@ export async function makeCodedClip(
   );
 }
 
+const BARCODE_FILTER =
+  "format=yuv420p,geq=" +
+  "lum='if(gt(Y,H/4),if(lt(N,96),40,if(lt(N,192),220,60)),32+6*if(lt(X,W/2),mod(N,32),floor(N/32)))'" +
+  ":cb=128:cr=128";
+
+/**
+ * Lossy codecs and containers cannot carry `makeCodedClip`'s exact values, so
+ * this writes each frame's number in two coarse bands, as base-32 digits that
+ * survive compression. They are too small to read as cuts. The rest of the
+ * picture changes at frames 96 and 192: those are the scene cuts.
+ */
+export async function makeBarcodeClip(
+  path: string,
+  encoding: string[],
+  { frames = 240, rate = 24, audio = false }: { frames?: number; rate?: number; audio?: boolean } = {},
+): Promise<void> {
+  const seconds = frames / rate;
+  await ffmpeg(
+    "-f", "lavfi",
+    "-i", `color=c=black:s=320x180:r=${rate}:d=${seconds}`,
+    ...(audio ? ["-f", "lavfi", "-i", `sine=d=${seconds}`] : []),
+    "-vf", BARCODE_FILTER,
+    ...encoding,
+    path,
+  );
+}
+
+/** Which frame of `makeBarcodeClip` an extracted image is. */
+export async function barcodeOf(file: string): Promise<number> {
+  const { data, info } = await sharp(file)
+    .greyscale()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+
+  const digit = (x: number): number => {
+    const value = data[Math.round(info.height / 8) * info.width + x]!;
+    // Luma comes back from video range to full range.
+    return Math.max(0, Math.round((value / 1.164 + 16 - 32) / 6));
+  };
+
+  return digit(Math.round((3 * info.width) / 4)) * 32 + digit(Math.round(info.width / 4));
+}
+
 /** Presentation time of every frame in a file. */
 export async function framePts(path: string): Promise<number[]> {
   const { stdout } = await run(
@@ -90,10 +134,12 @@ export async function framePts(path: string): Promise<number[]> {
     ["-v", "error", "-select_streams", "v", "-show_entries", "frame=pts_time", "-of", "csv=p=0", path],
     { maxBuffer: 64 * 1024 * 1024 },
   );
+  // FFmpeg 5.1 adds a blank row after a frame that carries side data.
   return stdout
     .trim()
     .split(/\r?\n/)
-    .map((line) => Number.parseFloat(line.replace(/,/g, "")));
+    .map((line) => Number.parseFloat(line.replace(/,/g, "")))
+    .filter((time) => Number.isFinite(time));
 }
 
 export async function waitUntil(

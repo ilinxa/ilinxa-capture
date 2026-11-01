@@ -3,7 +3,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { ZodType } from "zod";
 import type { RunOptions, SourceInput, Submission } from "../core/service.js";
 import type { CaptureService } from "../core/service.js";
-import { sendSubmission } from "./lib/respond.js";
+import { clientGone, sendSubmission } from "./lib/respond.js";
 import { readVideoRequest } from "./lib/upload.js";
 import { parseBody } from "./lib/validate.js";
 
@@ -45,6 +45,7 @@ export function createVideoJobHandler<T extends VideoJobRequest, R>(
         await submit(source, parsed, {
           async: parsed.async,
           webhookUrl: parsed.webhook_url,
+          signal: parsed.async ? undefined : clientGone(reply),
         }),
       );
     } catch (err) {

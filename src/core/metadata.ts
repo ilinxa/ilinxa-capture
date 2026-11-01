@@ -1,6 +1,13 @@
-import { ProcessingError } from "../utils/errors.js";
+import { basename } from "node:path";
+import { ProcessingError, UnsupportedFormatError } from "../utils/errors.js";
 import { execFileAsync } from "../utils/exec.js";
-import { MEDIA_INPUT_OPTIONS } from "./ffmpeg.js";
+import {
+  MEDIA_INPUT_OPTIONS,
+  PRINT_PTS_FILTER,
+  mediaInputArgs,
+  parsePtsLine,
+  runFfmpeg,
+} from "./ffmpeg.js";
 
 export interface AudioStream {
   /** Among audio streams only: 0 is the first audio stream. */
@@ -94,6 +101,72 @@ async function measureDuration(
 }
 
 /**
+ * Duration and rate of a raw stream. Its packets have no timestamps, and ffprobe
+ * reports 25 or double the real rate depending on the version, but the decoder
+ * paces frames from the stream's own headers.
+ */
+async function measureByDecoding(
+  source: string,
+  signal: AbortSignal | undefined,
+): Promise<{ duration: number; fps: number }> {
+  let frames = 0;
+  let first = 0;
+  let last = 0;
+
+  await runFfmpeg(
+    [
+      ...mediaInputArgs(source),
+      "-vf", PRINT_PTS_FILTER,
+      "-fps_mode", "passthrough",
+      "-an",
+      "-sn",
+      "-f", "null",
+      "-",
+    ],
+    {
+      ...(signal ? { signal } : {}),
+      onStdoutLine: (line) => {
+        const pts = parsePtsLine(line);
+        if (pts === null) return;
+        if (frames === 0) first = pts;
+        last = pts;
+        frames += 1;
+      },
+    },
+  );
+
+  if (last <= first) return { duration: 0, fps: 0 };
+  const fps = (frames - 1) / (last - first);
+  return { duration: frames / fps, fps: Math.round(fps * 100) / 100 };
+}
+
+/** The reason a file could not be read, for a caller to act on. */
+function readFailure(
+  err: unknown,
+  source: string,
+  signal: AbortSignal | undefined,
+): unknown {
+  if (signal?.aborted) return signal.reason;
+
+  const message = err instanceof Error ? err.message : String(err);
+  // The tool itself is missing, which is no fault of the file.
+  if ((err as { code?: unknown }).code === "ENOENT") {
+    return new ProcessingError(`ffprobe failed: ${message}`);
+  }
+
+  const reason = message
+    .split(source)
+    .join(basename(source))
+    .split("\n")
+    .pop()
+    ?.replace(/^\S+ exited with [^:]+: /, "");
+  return new UnsupportedFormatError(
+    `Not a readable video: ${reason}. Containers read: MP4, MOV, MKV, WebM, AVI, ` +
+      "MPEG-TS, MPEG-PS, FLV, WMV, Ogg, MXF, DV, and raw H.264, HEVC or MPEG video",
+  );
+}
+
+/**
  * Extract video metadata using ffprobe.
  * Accepts a local file path or a direct HTTP/HTTPS URL.
  */
@@ -118,9 +191,7 @@ export async function getVideoMetadata(
     );
     stdout = result.stdout;
   } catch (err) {
-    if (opts.signal?.aborted) throw opts.signal.reason;
-    const message = err instanceof Error ? err.message : String(err);
-    throw new ProcessingError(`ffprobe failed: ${message}`);
+    throw readFailure(err, source, opts.signal);
   }
 
   let parsed: FfprobeOutput;
@@ -132,7 +203,7 @@ export async function getVideoMetadata(
 
   const videoStream = parsed.streams?.find((s) => s.codec_type === "video");
   if (!videoStream) {
-    throw new ProcessingError("No video stream found in file");
+    throw new UnsupportedFormatError("No video stream found in file");
   }
 
   const format = parsed.format;
@@ -140,9 +211,20 @@ export async function getVideoMetadata(
     throw new ProcessingError("No format information found in file");
   }
 
-  const stated = parseFloat(format.duration ?? videoStream.duration ?? "0");
-  const duration =
-    stated > 0 ? stated : await measureDuration(source, opts.signal);
+  let duration = parseFloat(format.duration ?? videoStream.duration ?? "0");
+  let fps = parseFps(videoStream.r_frame_rate);
+
+  try {
+    if (!(duration > 0)) duration = await measureDuration(source, opts.signal);
+    if (!(duration > 0)) {
+      const decoded = await measureByDecoding(source, opts.signal);
+      duration = decoded.duration;
+      if (decoded.fps > 0) fps = decoded.fps;
+    }
+  } catch (err) {
+    throw readFailure(err, source, opts.signal);
+  }
+
   const sizeBytes = parseInt(format.size ?? "0", 10);
 
   // format_name can be comma-separated (e.g. "mov,mp4,m4a,3gp,3g2,mj2") — take the first
@@ -152,7 +234,7 @@ export async function getVideoMetadata(
     duration,
     width: videoStream.width ?? 0,
     height: videoStream.height ?? 0,
-    fps: parseFps(videoStream.r_frame_rate),
+    fps,
     codec: videoStream.codec_name ?? "unknown",
     size_bytes: sizeBytes,
     format: formatName,

@@ -10,13 +10,14 @@ interface MinimalLogger {
 }
 import type { Env } from "../lib/env.js";
 import {
+  FilesInUseError,
   JobBusyError,
   JobCancelledError,
   JobNotFoundError,
   JobTimeoutError,
 } from "../utils/errors.js";
 import { assertValidJobId, JOB_ID_PATTERN } from "./job-id.js";
-import { removeTree, writeFileAtomic } from "./safe-fs.js";
+import { isFileInUse, removeTree, settleSwap, writeFileAtomic } from "./safe-fs.js";
 
 export type JobStatus = "pending" | "processing" | "completed" | "failed";
 export type JobType =
@@ -30,6 +31,14 @@ export type JobType =
 export interface JobProgress {
   stage: string;
   percent: number | null;
+}
+
+/** A job's standing before it was reopened, to return to if the new work fails. */
+export interface ReopenSnapshot {
+  type: JobType;
+  status: JobStatus;
+  completed_at: string | null;
+  failed_at: string | null;
 }
 
 export interface JobState {
@@ -46,7 +55,19 @@ export interface JobState {
   result: unknown | null;
   processing_time_ms: number | null;
   progress: JobProgress | null;
+  /** On disk too, so a restart can undo a reopen it interrupted. */
+  reopened_from: ReopenSnapshot | null;
 }
+
+const jobTypeSchema = z.enum([
+  "extract",
+  "compose",
+  "combined",
+  "video_download",
+  "shots",
+  "audio",
+]);
+const jobStatusSchema = z.enum(["pending", "processing", "completed", "failed"]);
 
 // Kept adjacent to JobState so the two can't drift out of sync.
 // Non-identity fields are nullish (absent keys tolerated) so job.json files
@@ -55,15 +76,8 @@ export interface JobState {
 export const jobStateSchema = z
   .object({
     id: z.string().regex(JOB_ID_PATTERN),
-    type: z.enum([
-      "extract",
-      "compose",
-      "combined",
-      "video_download",
-      "shots",
-      "audio",
-    ]),
-    status: z.enum(["pending", "processing", "completed", "failed"]),
+    type: jobTypeSchema,
+    status: jobStatusSchema,
     created_at: z.string(),
     started_at: z.string().nullish(),
     completed_at: z.string().nullish(),
@@ -73,6 +87,14 @@ export const jobStateSchema = z
     webhook_url: z.string().nullish(),
     result: z.unknown().nullish(),
     processing_time_ms: z.number().nullish(),
+    reopened_from: z
+      .object({
+        type: jobTypeSchema,
+        status: jobStatusSchema,
+        completed_at: z.string().nullable(),
+        failed_at: z.string().nullable(),
+      })
+      .nullish(),
   })
   .transform(
     (j): JobState => ({
@@ -89,6 +111,7 @@ export const jobStateSchema = z
       result: j.result ?? null,
       processing_time_ms: j.processing_time_ms ?? null,
       progress: null,
+      reopened_from: j.reopened_from ?? null,
     }),
   );
 
@@ -112,12 +135,6 @@ interface ActiveJob {
   settled: Promise<void>;
 }
 
-/** A job's standing before it was reopened, to return to if the new work fails. */
-type ReopenSnapshot = Pick<
-  JobState,
-  "type" | "status" | "completed_at" | "failed_at"
->;
-
 interface WebhookPayload {
   event: "job.completed" | "job.failed";
   job_id: string;
@@ -131,8 +148,8 @@ interface WebhookPayload {
 export class JobManager {
   private readonly jobs: Map<string, JobState> = new Map();
   private readonly active: Map<string, ActiveJob> = new Map();
-  private readonly reopened: Map<string, ReopenSnapshot> = new Map();
   private readonly cancelled: Set<string> = new Set();
+  private readonly deleting: Set<string> = new Set();
   private readonly queue: PQueue;
   private readonly outputDir: string;
   private readonly logger: MinimalLogger;
@@ -171,6 +188,7 @@ export class JobManager {
       result: null,
       processing_time_ms: null,
       progress: null,
+      reopened_from: null,
     };
 
     this.jobs.set(jobId, job);
@@ -186,16 +204,16 @@ export class JobManager {
    */
   async reopenJob(jobId: string, opts: CreateJobOptions): Promise<JobState> {
     const job = this.getJob(jobId);
-    if (job.status === "pending" || job.status === "processing") {
+    if (job.status === "pending" || job.status === "processing" || this.deleting.has(jobId)) {
       throw new JobBusyError(jobId);
     }
 
-    this.reopened.set(jobId, {
+    job.reopened_from = {
       type: job.type,
       status: job.status,
       completed_at: job.completed_at,
       failed_at: job.failed_at,
-    });
+    };
 
     job.type = opts.type;
     job.status = "pending";
@@ -225,17 +243,26 @@ export class JobManager {
       throw new JobNotFoundError(jobId);
     }
 
-    const active = this.active.get(jobId);
-    if (active) {
-      active.controller.abort(new JobCancelledError(jobId));
-      await active.settled;
-    }
+    this.deleting.add(jobId);
+    try {
+      const active = this.active.get(jobId);
+      if (active) {
+        active.controller.abort(new JobCancelledError(jobId));
+        await active.settled;
+      }
 
-    // Removed from the registry only once gone: a failed delete stays tracked.
-    await removeTree(this.getJobDir(jobId));
-    this.jobs.delete(jobId);
-    this.reopened.delete(jobId);
-    this.cancelled.delete(jobId);
+      // Removed from the registry only once gone: a failed delete stays tracked.
+      await removeTree(this.getJobDir(jobId));
+      this.jobs.delete(jobId);
+      this.cancelled.delete(jobId);
+    } catch (err) {
+      // The queue may have skipped this job while the delete held it.
+      const job = this.jobs.get(jobId);
+      if (job) await this.persistJob(job).catch(() => {});
+      throw isFileInUse(err) ? new FilesInUseError(jobId) : err;
+    } finally {
+      this.deleting.delete(jobId);
+    }
   }
 
   /** Stop a job but keep it and its output: a caller gave up waiting for it. */
@@ -263,18 +290,25 @@ export class JobManager {
 
   /**
    * Run work that leaves no job record, under the same limits as a job: it
-   * takes a queue slot, times out, and stops at shutdown.
+   * takes a queue slot, times out, and stops at shutdown. `caller` going away
+   * stops it too, since no job ID exists for anyone to stop it by.
    */
-  async runTransient<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  async runTransient<T>(
+    task: (signal: AbortSignal) => Promise<T>,
+    caller?: AbortSignal,
+  ): Promise<T> {
     const key = `transient_${randomUUID()}`;
 
     const result = await this.queue.add(async () => {
-      if (this.closing) throw new JobCancelledError(key);
+      if (this.closing || caller?.aborted) throw new JobCancelledError(key);
 
       const { controller, finish } = this.track(key);
+      const cancel = (): void => controller.abort(new JobCancelledError(key));
+      caller?.addEventListener("abort", cancel, { once: true });
       try {
         return await task(controller.signal);
       } finally {
+        caller?.removeEventListener("abort", cancel);
         finish();
       }
     });
@@ -326,21 +360,24 @@ export class JobManager {
     onSkipped?: () => Promise<void>,
   ): Promise<T> {
     const job = this.jobs.get(jobId);
-    if (!job || this.closing || this.cancelled.has(jobId)) {
+    const deleting = this.deleting.has(jobId);
+    if (!job || this.closing || deleting || this.cancelled.has(jobId)) {
       // Deleted, cancelled or shut down while queued
       await onSkipped?.().catch(() => {});
-      if (job && this.cancelled.delete(jobId)) {
-        job.status = "failed";
-        job.failed_at = new Date().toISOString();
+      if (job && (this.cancelled.delete(jobId) || deleting)) {
         job.error = new JobCancelledError(jobId).message;
         job.error_code = "JOB_CANCELLED";
-        await this.persistJob(job);
+        if (!restoreReopened(job)) {
+          job.status = "failed";
+          job.failed_at = new Date().toISOString();
+        }
+        // A delete owns the directory now, and a write would bring it back.
+        if (!this.deleting.has(jobId)) await this.persistIfTracked(job);
       }
       throw new JobCancelledError(jobId);
     }
 
     const { controller, finish } = this.track(jobId);
-    const snapshot = this.reopened.get(jobId);
 
     const startTime = Date.now();
     try {
@@ -364,6 +401,7 @@ export class JobManager {
       job.result = taskResult;
       job.processing_time_ms = Date.now() - startTime;
       job.progress = null;
+      job.reopened_from = null;
       await this.persistIfTracked(job);
       return taskResult;
     } catch (err) {
@@ -379,12 +417,7 @@ export class JobManager {
 
       // Failed extra work must not cost the job what it already had. The error
       // stays on the record, but the output remains reachable.
-      if (snapshot) {
-        job.type = snapshot.type;
-        job.status = snapshot.status;
-        job.completed_at = snapshot.completed_at;
-        job.failed_at = snapshot.failed_at;
-      } else {
+      if (!restoreReopened(job)) {
         job.status = "failed";
         job.failed_at = new Date().toISOString();
       }
@@ -392,7 +425,6 @@ export class JobManager {
       await this.persistIfTracked(job);
       throw failure;
     } finally {
-      this.reopened.delete(jobId);
       finish();
     }
   }
@@ -461,13 +493,15 @@ export class JobManager {
         // Mark stuck jobs as failed
         if (job.status === "processing" || job.status === "pending") {
           job.error = "Server restarted during processing";
-          // A job with a result was reopened: its earlier output is still good.
-          if (job.result !== null) {
-            job.status = "completed";
-            job.completed_at = new Date().toISOString();
-          } else {
-            job.status = "failed";
-            job.failed_at = new Date().toISOString();
+          await settleSwap(join(this.getJobDir(job.id), "sheets"));
+
+          if (!restoreReopened(job)) {
+            // Older builds did not record a reopen, but a result shows one.
+            const reopened = job.result !== null;
+            job.status = reopened ? "completed" : "failed";
+            const now = new Date().toISOString();
+            if (reopened) job.completed_at = now;
+            else job.failed_at = now;
           }
           await this.persistJob(job);
         }
@@ -540,6 +574,19 @@ export class JobManager {
       );
     }
   }
+}
+
+/** Put a reopened job back as it stood. False if it was not reopened. */
+function restoreReopened(job: JobState): boolean {
+  const before = job.reopened_from;
+  if (!before) return false;
+
+  job.type = before.type;
+  job.status = before.status;
+  job.completed_at = before.completed_at;
+  job.failed_at = before.failed_at;
+  job.reopened_from = null;
+  return true;
 }
 
 function errorCode(err: unknown): string | null {

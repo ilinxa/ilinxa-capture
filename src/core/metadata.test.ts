@@ -160,12 +160,84 @@ describe("getVideoMetadata", () => {
     );
   });
 
-  it("throws ProcessingError when ffprobe fails", async () => {
-    mockExec.mockRejectedValue(new Error("ffprobe: No such file"));
-
-    await expect(getVideoMetadata("/nonexistent/file.mp4")).rejects.toThrow(
-      "ffprobe failed",
+  // Regression: a file that was simply not a video came back as a bare 500.
+  it("says why a file cannot be read, without the folder it is in", async () => {
+    const source = "/private/studio/film.mp4";
+    mockExec.mockRejectedValue(
+      new Error(
+        `ffprobe exited with code 1: ${source}: Invalid data found when processing input`,
+      ),
     );
+
+    const failure = await getVideoMetadata(source).catch((err: unknown) => err);
+
+    expect(failure).toMatchObject({ code: "UNSUPPORTED_FORMAT", statusCode: 400 });
+    const { message } = failure as Error;
+    expect(message).toContain("film.mp4: Invalid data");
+    expect(message).toContain("MKV");
+    expect(message).not.toContain("/private/studio");
+    expect(message).not.toContain("exited with");
+  });
+
+  it("treats a missing ffprobe as a fault of the server, not the file", async () => {
+    mockExec.mockRejectedValue(
+      Object.assign(new Error("spawn ffprobe ENOENT"), { code: "ENOENT" }),
+    );
+
+    await expect(getVideoMetadata("/film.mp4")).rejects.toMatchObject({
+      code: "PROCESSING_ERROR",
+    });
+  });
+
+  // ffprobe reports no duration here, 25 fps or double the real rate.
+  it("measures a raw stream by decoding it", async () => {
+    mockExec.mockImplementation(async (cmd, args, opts) => {
+      if (args.includes("-show_format")) {
+        return {
+          stdout: createFfprobeOutput({
+            streams: [{ codec_type: "video", r_frame_rate: "48/1" }],
+            format: { format_name: "h264" },
+          }),
+          stderr: "",
+        };
+      }
+      if (cmd === "ffmpeg") {
+        for (let i = 0; i < 144; i++) {
+          const pts = Math.round((i / 24) * 1e6);
+          opts?.onStdoutLine?.(`frame:${i}    pts:${pts} pts_time:0`);
+          opts?.onStdoutLine?.("capture=1");
+        }
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const metadata = await getVideoMetadata("/stream.h264");
+
+    expect(metadata.duration).toBeCloseTo(6, 3);
+    expect(metadata.fps).toBe(24);
+  });
+
+  it("keeps the probed rate when a stream is too short to measure", async () => {
+    mockExec.mockImplementation(async (cmd, args, opts) => {
+      if (args.includes("-show_format")) {
+        return {
+          stdout: createFfprobeOutput({
+            streams: [{ codec_type: "video", r_frame_rate: "24/1" }],
+            format: { format_name: "h264" },
+          }),
+          stderr: "",
+        };
+      }
+      if (cmd === "ffmpeg") {
+        opts?.onStdoutLine?.("frame:0    pts:0 pts_time:0");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    const metadata = await getVideoMetadata("/stream.h264");
+
+    expect(metadata.fps).toBe(24);
+    expect(metadata.duration).toBe(0);
   });
 
   it("throws ProcessingError for invalid JSON output", async () => {

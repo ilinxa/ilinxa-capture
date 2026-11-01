@@ -6,10 +6,12 @@ vi.mock("../utils/exec.js", () => ({
 
 vi.mock("node:fs/promises", () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
+  rm: vi.fn().mockResolvedValue(undefined),
 }));
 
+import { rm } from "node:fs/promises";
 import { execFileAsync } from "../utils/exec.js";
-import { extractShotFrames, type ShotFrameTarget } from "./shots.js";
+import { detectShots, extractShotFrames, type ShotFrameTarget } from "./shots.js";
 
 const mockExec = vi.mocked(execFileAsync);
 
@@ -27,8 +29,22 @@ const options = {
   preset: { width: null, format: "png" as const, quality: null },
 };
 
-function printFrame(opts: Parameters<typeof execFileAsync>[2]): void {
-  opts?.onStdoutLine?.("frame:0    pts:1000    pts_time:0.001");
+type ExecOptions = Parameters<typeof execFileAsync>[2];
+
+function printAt(opts: ExecOptions, decoded: number, kept: number): void {
+  opts?.onStdoutLine?.(`frame:0    pts:${decoded}    pts_time:0`);
+  opts?.onStdoutLine?.("decoded=1");
+  opts?.onStdoutLine?.(`frame:0    pts:${kept}    pts_time:0`);
+  opts?.onStdoutLine?.("capture=1");
+}
+
+function printFrame(opts: ExecOptions): void {
+  printAt(opts, 1000, 1000);
+}
+
+/** The time a grab asked for, in microseconds. */
+function trimTarget(args: string[]): number {
+  return Number(/trim=start_pts=(\d+)/.exec(args[args.indexOf("-vf") + 1]!)![1]);
 }
 
 describe("extractShotFrames workers", () => {
@@ -78,11 +94,9 @@ describe("extractShotFrames workers", () => {
 
   it("seeks again for the shot's last frame if a seek lands past it", async () => {
     mockExec.mockImplementation(async (_cmd, args, opts) => {
-      const seek = Number(args[args.indexOf("-ss") + 1]);
-      // First seek jumps a gap to well past the shot's end.
-      opts?.onStdoutLine?.(
-        `frame:0    pts:${seek < 2.5 ? 2_000_000 : 0}    pts_time:0`,
-      );
+      const target = trimTarget(args);
+      // The first grab jumps a gap to well past the shot's end.
+      printAt(opts, target, target === 2_000_000 ? 4_000_000 : target);
       return { stdout: "", stderr: "" };
     });
 
@@ -91,7 +105,84 @@ describe("extractShotFrames workers", () => {
       targets: [{ shot: 1, position: "middle", time: 2, latest: 3 }],
     });
 
-    expect(frame?.time).toBeCloseTo(3, 2);
+    expect(frame?.time).toBe(3);
     expect(mockExec).toHaveBeenCalledTimes(2);
+  });
+
+  // Regression: the retry was trusted, and a frame of the next shot went out
+  // labelled as this one.
+  it("drops a frame that still lands past the shot", async () => {
+    mockExec.mockImplementation(async (_cmd, args, opts) => {
+      printAt(opts, trimTarget(args), 9_000_000);
+      return { stdout: "", stderr: "" };
+    });
+
+    const frames = await extractShotFrames({
+      ...options,
+      frameInterval: 0.04,
+      targets: [{ shot: 1, position: "middle", time: 2, latest: 3 }],
+    });
+
+    expect(frames).toEqual([]);
+    expect(rm).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a frame that differs from the shot's end only by rounding", async () => {
+    mockExec.mockImplementation(async (_cmd, _args, opts) => {
+      printAt(opts, 3_000_001, 3_000_001);
+      return { stdout: "", stderr: "" };
+    });
+
+    const frames = await extractShotFrames({
+      ...options,
+      frameInterval: 0.04,
+      targets: [{ shot: 1, position: "last", time: 3, latest: 3 }],
+    });
+
+    expect(frames).toHaveLength(1);
+  });
+
+  // Regression: a sparse source paid for every failed margin on every grab.
+  it("remembers a margin that worked, for the grabs after it", async () => {
+    const many = targets.slice(20).map((t) => ({ ...t, time: t.time, latest: t.time }));
+
+    mockExec.mockImplementation(async (_cmd, args, opts) => {
+      const at = args.indexOf("-ss");
+      const seek = at === -1 ? 0 : Number(args[at + 1]);
+      const target = trimTarget(args);
+      // The demuxer lands 5 s past wherever it was sent.
+      printAt(opts, (seek + 5) * 1_000_000, target);
+      return { stdout: "", stderr: "" };
+    });
+
+    const frames = await extractShotFrames({
+      ...options,
+      format: "mpegts",
+      frameInterval: 0.04,
+      targets: many,
+    });
+
+    expect(frames).toHaveLength(many.length);
+    // Once per grab, plus the few that were already running when one learned it.
+    expect(mockExec.mock.calls.length).toBeLessThan(many.length + 5);
+  });
+
+  it("gives a shot of a single frame one frame's length", async () => {
+    mockExec.mockImplementation(async (_cmd, _args, opts) => {
+      opts?.onStdoutLine?.("frame:0    pts:0    pts_time:0");
+      opts?.onStdoutLine?.("lavfi.scene_score=0.000000");
+      return { stdout: "", stderr: "" };
+    });
+
+    const shots = await detectShots({
+      videoPath: "/film.mp4",
+      threshold: 0.3,
+      minShotSeconds: 0,
+      span: { start: 0, end: 10 },
+      frameInterval: 0.04,
+    });
+
+    expect(shots).toHaveLength(1);
+    expect(shots[0]?.duration).toBeCloseTo(0.04, 6);
   });
 });

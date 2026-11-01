@@ -1,11 +1,17 @@
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { ProcessingError, ValidationError } from "../utils/errors.js";
 import {
+  EXACT_ENCODER_TIMEBASE,
+  FIRST_DECODED_FILTER,
   PRINT_PTS_FILTER,
+  createFrameReader,
   mediaInputArgs,
-  parsePtsLine,
   runFfmpeg,
+  seekMargins,
+  seekOvershot,
+  seekPoint,
+  trimFilter,
   type TimeRange,
 } from "./ffmpeg.js";
 import { compareNatural } from "./natural-sort.js";
@@ -19,6 +25,8 @@ export interface ExtractionOptions {
   fps: number;
   preset: ResolvedPreset;
   range?: TimeRange | undefined;
+  /** Container, as ffprobe names it. Decides how to seek. */
+  format?: string | undefined;
   /** Seconds of media covered, for progress. */
   durationSeconds?: number | undefined;
   /** Seconds between source frames, when known. See samplingFilter. */
@@ -40,16 +48,19 @@ export interface ExtractionResult {
  * interval late. This keeps a real source frame with a known time, and leaves
  * a gap in the source as a gap, rather than duplicating or bursting frames.
  */
-function samplingFilter(fps: number, frameInterval: number): string {
-  // Timestamps can be rounded, as MKV's are to the millisecond: 0.033 s then
-  // falls short of the 1/30 boundary and the frame is lost. Just under half a
-  // source frame of slack absorbs that without moving an exact frame. The
-  // epsilon does the same where a rate like 1/3 has no exact binary form.
+function samplingFilter(fps: number, frameInterval: number): string | null {
+  // At or above the source rate every frame is wanted, and a grid finer than
+  // the frames would lose some to rounded timestamps.
+  if (frameInterval > 0 && fps * frameInterval >= 0.995) return null;
+
+  // Intervals count from the first frame, not from zero: audio priming puts
+  // video about 21 ms in, right on a boundary of a 24 fps grid. Timestamps can
+  // be rounded, as MKV's are to the millisecond, so just under half a source
+  // frame of slack keeps a frame on the interval it belongs to. The epsilon
+  // does the same where a rate like 1/3 has no exact binary form.
   const slack = frameInterval * 0.49;
   const interval = (t: string): string =>
-    slack > 0
-      ? `floor((${t}+${slack})*${fps}+0.000001)`
-      : `floor(${t}*${fps}+0.000001)`;
+    `floor((${t}-start_t+${slack})*${fps}+0.000001)`;
   return `select='isnan(prev_selected_t)+gt(${interval("t")},${interval("prev_selected_t")})'`;
 }
 
@@ -60,8 +71,16 @@ export function buildVideoFilter(
   fps: number,
   preset: ResolvedPreset,
   frameInterval = 0,
+  range?: TimeRange,
 ): string {
-  const filters: string[] = [samplingFilter(fps, frameInterval), PRINT_PTS_FILTER];
+  const sampling = samplingFilter(fps, frameInterval);
+  const filters: string[] = [
+    ...(range
+      ? [FIRST_DECODED_FILTER, trimFilter(range.start, range.end)]
+      : []),
+    ...(sampling ? [sampling] : []),
+    PRINT_PTS_FILTER,
+  ];
 
   if (preset.width !== null) {
     // -2 keeps aspect ratio with even dimensions (required by many codecs)
@@ -74,14 +93,15 @@ export function buildVideoFilter(
 /**
  * Build the full FFmpeg argument array for frame extraction.
  */
-export function buildFfmpegArgs(opts: ExtractionOptions): string[] {
+export function buildFfmpegArgs(opts: ExtractionOptions, seek?: number): string[] {
   const ext = opts.preset.format === "png" ? "png" : "jpg";
   const outputPattern = join(opts.outputDir, `frame_%04d.${ext}`);
 
   const args: string[] = [
-    ...mediaInputArgs(opts.videoPath, opts.range),
-    "-vf", buildVideoFilter(opts.fps, opts.preset, opts.frameInterval),
+    ...mediaInputArgs(opts.videoPath, seek),
+    "-vf", buildVideoFilter(opts.fps, opts.preset, opts.frameInterval, opts.range),
     "-fps_mode", "passthrough",
+    ...EXACT_ENCODER_TIMEBASE,
     "-an",
   ];
 
@@ -103,28 +123,37 @@ export async function extractFrames(
 ): Promise<ExtractionResult> {
   await mkdir(opts.outputDir, { recursive: true });
 
-  // With a seek, FFmpeg's clock restarts at the range start.
-  const offset = opts.range?.start ?? 0;
-  const printedTimes: number[] = [];
+  const start = opts.range?.start ?? 0;
+  let printedTimes: number[] = [];
 
-  try {
-    await runFfmpeg(buildFfmpegArgs(opts), {
-      signal: opts.signal,
-      durationSeconds: opts.durationSeconds,
-      onProgress: opts.onProgress,
-      onStdoutLine: (line) => {
-        const pts = parsePtsLine(line);
-        if (pts !== null) printedTimes.push(pts + offset);
-      },
-    });
-  } catch (err) {
-    if (opts.signal?.aborted) throw opts.signal.reason;
-    // Some encoders fail rather than finish when no frame ever reaches them.
-    if (opts.range && printedTimes.length === 0) {
-      throw new ValidationError("No video frames in the requested range");
+  for (const margin of opts.range ? seekMargins(opts.format) : [Infinity]) {
+    const seek = opts.range ? seekPoint(start, margin) : undefined;
+    const reader = createFrameReader();
+    printedTimes = reader.times;
+
+    try {
+      await runFfmpeg(buildFfmpegArgs(opts, seek), {
+        signal: opts.signal,
+        durationSeconds: opts.durationSeconds,
+        onProgress: opts.onProgress,
+        onStdoutLine: reader.onLine,
+      });
+    } catch (err) {
+      if (opts.signal?.aborted) throw opts.signal.reason;
+      // Some encoders fail rather than finish when no frame ever reaches them.
+      if (opts.range && printedTimes.length === 0) {
+        if (seek !== undefined && seek > 0) continue;
+        throw new ValidationError("No video frames in the requested range");
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ProcessingError(`FFmpeg extraction failed: ${message}`);
     }
-    const message = err instanceof Error ? err.message : String(err);
-    throw new ProcessingError(`FFmpeg extraction failed: ${message}`);
+
+    if (!seekOvershot(seek, reader.firstDecoded(), start, opts.frameInterval ?? 0)) {
+      break;
+    }
+    await rm(opts.outputDir, { recursive: true, force: true });
+    await mkdir(opts.outputDir, { recursive: true });
   }
 
   const entries = await readdir(opts.outputDir);
@@ -141,7 +170,7 @@ export async function extractFrames(
     frameFiles,
     frameCount: frameFiles.length,
     frameTimes: frameFiles.map(
-      (_, i) => printedTimes[i] ?? offset + i / opts.fps,
+      (_, i) => printedTimes[i] ?? start + i / opts.fps,
     ),
   };
 }

@@ -101,6 +101,7 @@ export function execFileAsync(
     let failure: { reason: unknown } | null = null;
     let forceKillTimer: NodeJS.Timeout | null = null;
     let settleTimer: NodeJS.Timeout | null = null;
+    let drainTimer: NodeJS.Timeout | null = null;
     let timeoutTimer: NodeJS.Timeout | null = null;
 
     const stop = (reason: unknown): void => {
@@ -153,7 +154,17 @@ export function execFileAsync(
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
       if (settleTimer) clearTimeout(settleTimer);
+      if (drainTimer) clearTimeout(drainTimer);
     };
+
+    // `close` waits for the pipes, which a descendant can hold after this process
+    // has exited. Closing our ends lets `close` fire with the real exit code.
+    child.once("exit", () => {
+      drainTimer = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+      }, SETTLE_LIMIT_MS);
+    });
 
     child.once("error", (err) => {
       cleanup();

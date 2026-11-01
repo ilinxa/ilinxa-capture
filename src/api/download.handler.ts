@@ -1,3 +1,5 @@
+import { open } from "node:fs/promises";
+import type { ReadStream } from "node:fs";
 import { join } from "node:path";
 import { ZipArchive } from "archiver";
 import type { FastifyReply, FastifyRequest } from "fastify";
@@ -38,17 +40,53 @@ export function createDownloadHandler(jobManager: JobManager, storage: Storage) 
       reply.raw.destroy(err);
     });
 
-    // file(), not append(stream): a film's frames would each hold a descriptor
-    // open from the start, and the OS limit is reached around 8,000 on Windows.
-    for (const file of files) {
-      archive.file(file.path, { name: file.relativePath });
-    }
-
+    const queue = files.map((file) => ({ path: file.path, name: file.relativePath }));
     if (await storage.fileExists(jobId, "manifest.json")) {
-      archive.file(join(storage.getJobDir(jobId), "manifest.json"), {
+      queue.push({
+        path: join(storage.getJobDir(jobId), "manifest.json"),
         name: "manifest.json",
       });
     }
+
+    // One file open at a time: a film's frames all opened up front would pass
+    // the OS limit. Held here, not inside archiver, so a client that hangs up
+    // leaves nothing open, which on Windows would stop the job being deleted.
+    let current: ReadStream | null = null;
+    const next = async (): Promise<void> => {
+      const entry = queue.shift();
+      if (!entry) {
+        current = null;
+        archive.finalize().catch(() => {});
+        return;
+      }
+      // Opened first: a file gone by now is skipped, as archive.file() would.
+      const handle = await open(entry.path).catch(() => null);
+      if (!handle) return next();
+      if (reply.raw.destroyed) {
+        await handle.close();
+        return;
+      }
+      current = handle.createReadStream();
+      current.on("error", (err: Error) => {
+        request.log.error({ err, jobId }, "ZIP read failed");
+        reply.raw.destroy(err);
+      });
+      archive.append(current, { name: entry.name });
+    };
+    const feed = (): void => {
+      next().catch((err: unknown) => {
+        request.log.error({ err, jobId }, "ZIP read failed");
+        reply.raw.destroy();
+      });
+    };
+    archive.on("entry", feed);
+
+    reply.raw.once("close", () => {
+      if (reply.raw.writableFinished) return;
+      queue.length = 0;
+      current?.destroy();
+      archive.abort();
+    });
 
     void reply
       .header("content-type", "application/zip")
@@ -58,7 +96,7 @@ export function createDownloadHandler(jobManager: JobManager, storage: Storage) 
       )
       .send(archive);
 
-    // Finalize AFTER send — Fastify pipes the stream, archiver pushes data
-    await archive.finalize();
+    feed();
+    await reply;
   };
 }

@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { CaptureService } from "../core/service.js";
 import { metadataRequestSchema } from "./schemas.js";
 import type { MetadataResponse } from "./schemas.js";
+import { clientGone } from "./lib/respond.js";
 import { readVideoRequest } from "./lib/upload.js";
 import { parseBody } from "./lib/validate.js";
 
@@ -27,7 +28,7 @@ export function createMetadataHandler(service: CaptureService) {
     }
 
     const { source } = parseBody(metadataRequestSchema, request.body);
-    const metadata = await service.probe(source);
+    const metadata = await service.probe(source, clientGone(reply));
     void reply.code(200).send(metadata satisfies MetadataResponse);
   };
 }

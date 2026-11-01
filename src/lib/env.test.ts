@@ -1,5 +1,61 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { loadEnv, resetEnvCache } from "./env.js";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadDotEnv, loadEnv, resetEnvCache } from "./env.js";
+
+describe("loadDotEnv", () => {
+  // loadEnvFile writes to the real environment, whatever object is assigned to
+  // process.env, so these restore what they touch.
+  const KEY = "ILINXA_CAPTURE_ENV_TEST";
+  const nodeEnv = process.env["NODE_ENV"];
+  let dir: string;
+  let file: string;
+
+  beforeEach(() => {
+    delete process.env[KEY];
+    dir = mkdtempSync(join(tmpdir(), "ilinxa-env-"));
+    file = join(dir, ".env");
+  });
+
+  afterEach(() => {
+    delete process.env[KEY];
+    process.env["NODE_ENV"] = nodeEnv;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reads settings from the file", () => {
+    writeFileSync(file, `${KEY}=42\n`);
+
+    loadDotEnv(file);
+
+    expect(process.env[KEY]).toBe("42");
+  });
+
+  it("lets the real environment win", () => {
+    process.env[KEY] = "7";
+    writeFileSync(file, `${KEY}=42\n`);
+
+    loadDotEnv(file);
+
+    expect(process.env[KEY]).toBe("7");
+  });
+
+  // Regression: a checkout's development .env trusted the Vite origins on a
+  // plain `npm start`.
+  it("never takes NODE_ENV from the file", () => {
+    delete process.env["NODE_ENV"];
+    writeFileSync(file, "NODE_ENV=development\n");
+
+    loadDotEnv(file);
+
+    expect(process.env["NODE_ENV"]).toBeUndefined();
+  });
+
+  it("is fine with no file", () => {
+    expect(() => loadDotEnv(join(dir, "missing"))).not.toThrow();
+  });
+});
 
 describe("loadEnv", () => {
   const originalEnv = process.env;

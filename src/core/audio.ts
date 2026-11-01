@@ -2,7 +2,7 @@ import { mkdir, stat } from "node:fs/promises";
 import { execFileAsync } from "../utils/exec.js";
 import { join } from "node:path";
 import { ProcessingError } from "../utils/errors.js";
-import { mediaInputArgs, runFfmpeg, type TimeRange } from "./ffmpeg.js";
+import { MEDIA_INPUT_OPTIONS, rangeInputArgs, runFfmpeg, type TimeRange } from "./ffmpeg.js";
 
 export type AudioFormat = "wav" | "flac" | "mp3" | "m4a";
 
@@ -28,9 +28,10 @@ export interface AudioExtractionOptions {
 }
 
 /** Highest sample rate each lossy encoder accepts. */
-export const MAX_SAMPLE_RATE: Partial<Record<AudioFormat, number>> = {
-  mp3: 48000,
-  m4a: 96000,
+/** What the encoder takes. Any other rate only fails once it opens. */
+export const SAMPLE_RATES: Partial<Record<AudioFormat, number[]>> = {
+  mp3: [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000],
+  m4a: [7350, 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 64000, 88200, 96000],
 };
 
 export interface AudioExtractionResult {
@@ -47,7 +48,9 @@ export function buildAudioArgs(
   outputPath: string,
 ): string[] {
   return [
-    ...mediaInputArgs(opts.videoPath, opts.range),
+    ...rangeInputArgs(opts.range),
+    ...MEDIA_INPUT_OPTIONS,
+    "-i", opts.videoPath,
     "-map", `0:a:${opts.stream}`,
     "-vn",
     "-sn",

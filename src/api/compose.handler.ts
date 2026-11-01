@@ -2,7 +2,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import type { CaptureService } from "../core/service.js";
 import { ValidationError } from "../utils/errors.js";
 import { composeRequestSchema } from "./schemas.js";
-import { sendSubmission } from "./lib/respond.js";
+import { clientGone, sendSubmission } from "./lib/respond.js";
 import { parseBody } from "./lib/validate.js";
 
 export function createComposeHandler(service: CaptureService) {
@@ -22,6 +22,7 @@ export function createComposeHandler(service: CaptureService) {
       await service.compose(parsed, {
         async: parsed.async,
         webhookUrl: parsed.webhook_url,
+        signal: parsed.async ? undefined : clientGone(reply),
       }),
     );
   };

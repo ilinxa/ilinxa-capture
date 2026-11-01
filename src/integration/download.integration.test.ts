@@ -139,6 +139,37 @@ describe.skipIf(!hasYtDlp())("URL sources (real yt-dlp)", () => {
     }
   }, 30_000);
 
+  // Regression: this kept the only slot for the whole timeout, with no job ID
+  // for anyone to stop it by.
+  it("gives the slot back when the client gives up on a URL probe", async () => {
+    const limited = await startServer({
+      LOCAL_OUTPUT_DIR: join(dir, "gave-up"),
+      JOB_TIMEOUT: 60,
+      MAX_CONCURRENT_JOBS: 1,
+    });
+    try {
+      const controller = new AbortController();
+      const probe = fetch(`${limited.baseUrl}/api/v1/metadata`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ source: slowUrl }),
+        signal: controller.signal,
+      }).catch(() => null);
+
+      await new Promise((r) => setTimeout(r, 1000));
+      controller.abort();
+      await probe;
+
+      const next = await limited.post("/api/v1/extract", {
+        source: join(dir, "clip.mp4"),
+        fps: 1,
+      });
+      expect(next.status).toBe(200);
+    } finally {
+      await limited.close();
+    }
+  }, 30_000);
+
   // Regression: downloads ran outside the job, so nothing could stop them.
   it("stops a stuck download at the job timeout", async () => {
     const root = join(dir, "stuck");

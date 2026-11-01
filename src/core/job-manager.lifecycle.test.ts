@@ -1,8 +1,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+
+vi.mock("./safe-fs.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./safe-fs.js")>();
+  return { ...original, removeTree: vi.fn(original.removeTree) };
+});
+
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobManager, type JobContext } from "./job-manager.js";
+import { removeTree } from "./safe-fs.js";
 import { createTestEnv } from "../test/env.js";
 import type { Env } from "../lib/env.js";
 
@@ -150,6 +157,86 @@ describe("JobManager lifecycle", () => {
       await expect(access(join(dir, job.id))).rejects.toThrow();
     });
 
+    // Regression: the job stayed in the registry during the delete, so the queue
+    // started it, and it wrote into the folder being removed.
+    it("does not start a queued job while its delete is under way", async () => {
+      const manager = createManager({ MAX_CONCURRENT_JOBS: 1 });
+      const blocker = await manager.createJob("cap_00000001", { type: "extract" });
+      const queued = await manager.createJob("cap_00000002", { type: "extract" });
+      const started = vi.fn();
+
+      manager.runAsync(blocker.id, hang);
+      await waitFor(() => blocker.status === "processing");
+      manager.runAsync(queued.id, async () => {
+        started();
+      });
+
+      let finishDelete: () => void = () => {};
+      vi.mocked(removeTree).mockImplementationOnce(async (path) => {
+        await new Promise<void>((done) => {
+          finishDelete = done;
+        });
+        await rm(path, { recursive: true, force: true });
+      });
+      const deleting = manager.deleteJob(queued.id);
+      await waitFor(() => vi.mocked(removeTree).mock.calls.length > 0);
+
+      // The slot comes free in the middle of the delete.
+      manager.cancelJob(blocker.id);
+      await waitFor(() => blocker.status === "failed");
+      await new Promise((r) => setTimeout(r, 50));
+
+      finishDelete();
+      await deleting;
+
+      expect(started).not.toHaveBeenCalled();
+      await expect(access(join(dir, queued.id))).rejects.toThrow();
+      expect(() => manager.getJob(queued.id)).toThrow();
+    });
+
+    // Removing it from the registry first would strand the folder, with nothing
+    // left to say it exists.
+    it("keeps a job it could not remove, and says what to do", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_00000001", { type: "extract" });
+      await manager.runSync(job.id, async () => "done");
+
+      vi.mocked(removeTree).mockRejectedValueOnce(
+        Object.assign(new Error("held open"), { code: "EPERM" }),
+      );
+
+      await expect(manager.deleteJob(job.id)).rejects.toMatchObject({
+        code: "FILES_IN_USE",
+        statusCode: 409,
+      });
+
+      expect(manager.getJob(job.id).status).toBe("completed");
+      await access(join(dir, job.id, "job.json"));
+    });
+
+    it("refuses to reopen a job being deleted", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_00000001", { type: "extract" });
+      await manager.runSync(job.id, async () => "done");
+
+      let finishDelete: () => void = () => {};
+      vi.mocked(removeTree).mockImplementationOnce(
+        () =>
+          new Promise<void>((done) => {
+            finishDelete = done;
+          }),
+      );
+      const deleting = manager.deleteJob(job.id);
+      await waitFor(() => vi.mocked(removeTree).mock.calls.length > 0);
+
+      await expect(
+        manager.reopenJob(job.id, { type: "combined" }),
+      ).rejects.toMatchObject({ code: "JOB_BUSY" });
+
+      finishDelete();
+      await deleting;
+    });
+
     it("does not start a job deleted while it was queued", async () => {
       const manager = createManager({ MAX_CONCURRENT_JOBS: 1 });
       const first = await manager.createJob("cap_00000008", { type: "extract" });
@@ -234,6 +321,40 @@ describe("JobManager lifecycle", () => {
     expect(queued.status).toBe("failed");
   });
 
+  // Regression: this marked a finished job failed, and its output refused to
+  // download until a later compose succeeded.
+  it("cancelling queued work on a finished job leaves the job as it was", async () => {
+    const manager = createManager({ MAX_CONCURRENT_JOBS: 1 });
+    const done = await manager.createJob("cap_00000001", { type: "extract" });
+    await manager.runSync(done.id, async () => "frames");
+    const { completed_at: completedAt } = done;
+
+    const blocker = await manager.createJob("cap_00000002", { type: "extract" });
+    manager.runAsync(blocker.id, hang);
+    await waitFor(() => blocker.status === "processing");
+
+    await manager.reopenJob(done.id, { type: "combined" });
+    const queued = manager.runSync(done.id, async () => "sheets");
+    manager.cancelJob(done.id);
+    manager.cancelJob(blocker.id);
+
+    await expect(queued).rejects.toMatchObject({ code: "JOB_CANCELLED" });
+
+    expect(done).toMatchObject({
+      status: "completed",
+      type: "extract",
+      completed_at: completedAt,
+      error_code: "JOB_CANCELLED",
+      result: "frames",
+      reopened_from: null,
+    });
+
+    const onDisk = JSON.parse(
+      await readFile(join(dir, done.id, "job.json"), "utf-8"),
+    ) as { status: string };
+    expect(onDisk.status).toBe("completed");
+  });
+
   it("cancels a running job but keeps its record", async () => {
     const manager = createManager();
     const job = await manager.createJob("cap_0000001c", { type: "extract" });
@@ -273,6 +394,53 @@ describe("JobManager lifecycle", () => {
 
   // Regression: a reopen landing as the previous run finished had its active
   // entry deleted by the old run, so nothing could stop it any more.
+  describe("transient work a caller gave up on", () => {
+    it("stops it if running", async () => {
+      const manager = createManager();
+      const controller = new AbortController();
+
+      const run = manager.runTransient(
+        (signal) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(signal.reason));
+            controller.abort();
+          }),
+        controller.signal,
+      );
+
+      await expect(run).rejects.toMatchObject({ code: "JOB_CANCELLED" });
+    });
+
+    it("never starts it if still queued", async () => {
+      const manager = createManager({ MAX_CONCURRENT_JOBS: 1 });
+      const blocker = await manager.createJob("cap_00000001", { type: "extract" });
+      manager.runAsync(blocker.id, hang);
+      await waitFor(() => blocker.status === "processing");
+
+      const controller = new AbortController();
+      const started = vi.fn();
+      const run = manager.runTransient(async () => {
+        started();
+      }, controller.signal);
+
+      controller.abort();
+      manager.cancelJob(blocker.id);
+
+      await expect(run).rejects.toMatchObject({ code: "JOB_CANCELLED" });
+      expect(started).not.toHaveBeenCalled();
+    });
+
+    it("drops its listener once finished", async () => {
+      const manager = createManager();
+      const controller = new AbortController();
+      const remove = vi.spyOn(controller.signal, "removeEventListener");
+
+      await manager.runTransient(async () => "ok", controller.signal);
+
+      expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
+    });
+  });
+
   it("still stops a job reopened just as its previous run finished", async () => {
     for (let round = 0; round < 8; round++) {
       const manager = createManager();
@@ -398,6 +566,11 @@ describe("JobManager lifecycle", () => {
   });
 
   describe("recovery", () => {
+    async function writeJobFile(id: string, job: Record<string, unknown>): Promise<void> {
+      await mkdir(join(dir, id), { recursive: true });
+      await writeFile(join(dir, id, "job.json"), JSON.stringify(job));
+    }
+
     async function plant(entry: string, id: string): Promise<void> {
       await mkdir(join(dir, entry), { recursive: true });
       await writeFile(
@@ -451,6 +624,79 @@ describe("JobManager lifecycle", () => {
       const job = manager.getJob("cap_0000001e");
       expect(job.status).toBe("completed");
       expect(job.error).toContain("restarted");
+    });
+
+    // Regression: only `status` came back, so an extract job stayed `combined`.
+    it("undoes a reopen a crash interrupted", async () => {
+      const completedAt = "2026-01-01T00:00:00.000Z";
+      await writeJobFile("cap_00000005", {
+        id: "cap_00000005",
+        type: "combined",
+        status: "processing",
+        created_at: completedAt,
+        result: { frames: 3 },
+        reopened_from: {
+          type: "extract",
+          status: "completed",
+          completed_at: completedAt,
+          failed_at: null,
+        },
+      });
+
+      const manager = createManager();
+      await manager.recover();
+
+      const job = manager.getJob("cap_00000005");
+      expect(job).toMatchObject({
+        type: "extract",
+        status: "completed",
+        completed_at: completedAt,
+        reopened_from: null,
+      });
+    });
+
+    it("returns a failed job to failed, not completed", async () => {
+      const failedAt = "2026-01-01T00:00:00.000Z";
+      await writeJobFile("cap_00000006", {
+        id: "cap_00000006",
+        type: "combined",
+        status: "pending",
+        created_at: failedAt,
+        result: { frames: 3 },
+        reopened_from: {
+          type: "extract",
+          status: "failed",
+          completed_at: null,
+          failed_at: failedAt,
+        },
+      });
+
+      const manager = createManager();
+      await manager.recover();
+
+      expect(manager.getJob("cap_00000006")).toMatchObject({
+        status: "failed",
+        failed_at: failedAt,
+      });
+    });
+
+    it("puts sheets back if a crash came in the middle of swapping them", async () => {
+      await writeJobFile("cap_00000007", {
+        id: "cap_00000007",
+        type: "combined",
+        status: "processing",
+        created_at: "2026-01-01T00:00:00.000Z",
+        result: {},
+      });
+      const jobDir = join(dir, "cap_00000007");
+      await mkdir(join(jobDir, "sheets.old"));
+      await writeFile(join(jobDir, "sheets.old", "sheet_001.jpg"), "x");
+      await mkdir(join(jobDir, "sheets.tmp"));
+
+      await createManager().recover();
+
+      expect(await readdir(join(jobDir, "sheets"))).toEqual(["sheet_001.jpg"]);
+      await expect(access(join(jobDir, "sheets.tmp"))).rejects.toThrow();
     });
 
     it("marks an interrupted job failed", async () => {

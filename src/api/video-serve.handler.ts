@@ -59,6 +59,9 @@ export function createVideoServeHandler(
       "Content-Length": fileStat.size,
       "Content-Disposition": `attachment; filename="${encodeURIComponent(videoFile)}"`,
     });
-    createReadStream(filePath).pipe(reply.raw);
+    const stream = createReadStream(filePath);
+    reply.raw.once("close", () => stream.destroy());
+    stream.on("error", (err) => reply.raw.destroy(err));
+    stream.pipe(reply.raw);
   };
 }

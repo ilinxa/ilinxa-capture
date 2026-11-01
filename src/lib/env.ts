@@ -69,6 +69,23 @@ const envSchema = z
 
 export type Env = z.infer<typeof envSchema>;
 
+/**
+ * Load `.env`. Values already in the environment win over the file. NODE_ENV is
+ * the exception: it never comes from the file, so that a checkout's development
+ * settings cannot loosen the origin checks of a plain start.
+ */
+export function loadDotEnv(path = ".env"): void {
+  const nodeEnv = process.env["NODE_ENV"];
+  try {
+    process.loadEnvFile(path);
+  } catch {
+    // No .env file: configuration comes from the environment alone
+  }
+
+  if (nodeEnv === undefined) delete process.env["NODE_ENV"];
+  else process.env["NODE_ENV"] = nodeEnv;
+}
+
 let cachedEnv: Env | null = null;
 
 export function loadEnv(): Env {

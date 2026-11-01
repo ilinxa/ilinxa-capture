@@ -1,4 +1,7 @@
 import { describe, it, expect } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { execFileAsync } from "./exec.js";
 
 // Real child processes: `node -e` behaves the same on Windows and Linux.
@@ -140,6 +143,78 @@ describe("execFileAsync", () => {
     await expect(run).rejects.toThrow("stop");
     expect(Date.now() - started).toBeLessThan(10_000);
   }, 15_000);
+
+  // Regression: `close` waits for the pipes, so a process that had finished was
+  // waited on for as long as anything it left behind kept running.
+  it("does not wait on pipes a descendant kept after the process exited", async () => {
+    const parent = `
+      const { spawn } = require("node:child_process");
+      spawn(process.execPath, ["-e", "setTimeout(() => {}, 12000)"], {
+        detached: true,
+        stdio: ["ignore", "inherit", "inherit"],
+      }).unref();
+      console.log("done");
+      process.exit(0);
+    `;
+    const started = Date.now();
+
+    const result = await execFileAsync(node, ["-e", parent]);
+
+    expect(result.stdout.trim()).toBe("done");
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 15_000);
+
+  it("still reports the exit code of a process that left pipes held", async () => {
+    const parent = `
+      const { spawn } = require("node:child_process");
+      spawn(process.execPath, ["-e", "setTimeout(() => {}, 8000)"], {
+        detached: true,
+        stdio: ["ignore", "inherit", "inherit"],
+      }).unref();
+      process.exit(7);
+    `;
+
+    await expect(execFileAsync(node, ["-e", parent])).rejects.toThrow(/code 7/);
+  }, 15_000);
+
+  // A Node parent hides a missing tree kill on Windows, because libuv ties its
+  // children to it. yt-dlp is Python, so the middle process here is not Node.
+  it.runIf(process.platform === "win32")(
+    "kills through a parent that is not Node",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "ilinxa-tree-"));
+      const pidFile = join(dir, "pid");
+      const script = join(dir, "grandchild.js");
+      const launcher = join(dir, "run.cmd");
+      writeFileSync(
+        script,
+        `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));` +
+          "setInterval(() => {}, 1000);",
+      );
+      writeFileSync(launcher, `@"${node}" "${script}" >NUL 2>&1 <NUL\r\n`);
+
+      const controller = new AbortController();
+      const run = execFileAsync("cmd.exe", ["/c", launcher], {
+        signal: controller.signal,
+      });
+
+      for (let i = 0; i < 100 && !existsSync(pidFile); i++) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await new Promise((r) => setTimeout(r, 100));
+      const pid = Number(readFileSync(pidFile, "utf8"));
+      expect(isAlive(pid)).toBe(true);
+
+      controller.abort(new Error("stop"));
+      await expect(run).rejects.toThrow("stop");
+
+      const gone = await waitForExit(pid);
+      if (!gone) process.kill(pid, "SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
+      expect(gone).toBe(true);
+    },
+    20_000,
+  );
 
   it("rejects immediately when the signal is already aborted", async () => {
     const reason = new Error("already gone");

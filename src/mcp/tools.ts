@@ -196,7 +196,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ source }) => guarded(() => service.probe(source)),
+    async ({ source }, extra) => guarded(() => service.probe(source, extra.signal)),
   );
 
   // ─── Tool 2: capture_extract ────────────────────────────────────────

@@ -37,6 +37,23 @@ function bindAddress(host: string): string | null {
     : normalized;
 }
 
+/** What to say at startup about a bind address other machines can reach. */
+export function exposureWarning(host: string): string | null {
+  const normalized = host.trim().toLowerCase();
+  if (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized === "[::1]" ||
+    normalized.startsWith("127.")
+  ) {
+    return null;
+  }
+  return (
+    `Bound to ${host}, so other machines can reach this server, and it has no login. ` +
+    "The Host check stops browsers, not other clients. Set HOST=127.0.0.1 to keep it local"
+  );
+}
+
 export function createNetGuard(
   env: Pick<Env, "HOST" | "ALLOWED_HOSTS" | "ALLOWED_ORIGINS" | "NODE_ENV">,
 ): NetGuard {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { buildApp } from "../../app.js";
-import { createNetGuard } from "./net-guard.js";
+import { createNetGuard, exposureWarning } from "./net-guard.js";
 import { createTestEnv } from "../../test/env.js";
 import type { FastifyInstance } from "fastify";
 
@@ -12,6 +12,19 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       .fn()
       .mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
   };
+});
+
+describe("exposureWarning", () => {
+  it.each(["127.0.0.1", "127.1.2.3", "localhost", "LOCALHOST", "::1", "[::1]"])(
+    "stays quiet about %s",
+    (host) => {
+      expect(exposureWarning(host)).toBeNull();
+    },
+  );
+
+  it.each(["0.0.0.0", "::", "192.168.1.20"])("warns about %s", (host) => {
+    expect(exposureWarning(host)).toContain("no login");
+  });
 });
 
 describe("createNetGuard", () => {

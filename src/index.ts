@@ -1,5 +1,6 @@
-import { loadEnv } from "./lib/env.js";
+import { loadDotEnv, loadEnv } from "./lib/env.js";
 import { buildApp } from "./app.js";
+import { exposureWarning } from "./api/lib/net-guard.js";
 import { CleanupScheduler } from "./core/cleanup.js";
 
 async function main(): Promise<void> {
@@ -8,12 +9,7 @@ async function main(): Promise<void> {
     process.env["NODE_ENV"] ??= "development";
   }
 
-  // Values already in the environment win over the file.
-  try {
-    process.loadEnvFile();
-  } catch {
-    // No .env file: configuration comes from the environment alone
-  }
+  loadDotEnv();
 
   let env;
   try {
@@ -39,6 +35,8 @@ async function main(): Promise<void> {
   try {
     const address = await app.listen({ port: env.PORT, host: env.HOST });
     app.log.info(`Server listening on ${address}`);
+    const warning = exposureWarning(env.HOST);
+    if (warning) app.log.warn(warning);
     app.log.info(`Health check: ${address}/api/v1/health`);
     app.log.info(`Web UI: ${address}`);
   } catch (err) {

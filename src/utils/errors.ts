@@ -58,6 +58,12 @@ export const JobCancelledError = createError(
   409,
 );
 
+export const FilesInUseError = createError(
+  "FILES_IN_USE",
+  "Job '%s' has files open in another program. Close them and try again",
+  409,
+);
+
 // 410 Gone
 export const JobExpiredError = createError(
   "JOB_EXPIRED",

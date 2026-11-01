@@ -106,10 +106,14 @@ describe("CleanupScheduler", () => {
     // Regression: a locked file rejected out of sweep() and ended the process,
     // after job.json had already gone, stranding the rest of the folder.
     it("survives a locked job, keeps it whole, and carries on to the next", async () => {
+      vi.useRealTimers();
       jobsThen(["cap_0000beef", "cap_0000abc0"]);
-      mockRename.mockRejectedValueOnce(
-        Object.assign(new Error("busy"), { code: "EBUSY" }),
-      );
+      // Retried a few times, as a scanner holding it for a moment would need.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        mockRename.mockRejectedValueOnce(
+          Object.assign(new Error("busy"), { code: "EBUSY" }),
+        );
+      }
       const onJobRemoved = vi.fn();
       const scheduler = new CleanupScheduler({
         outputDir: "/data/jobs",
@@ -127,6 +131,22 @@ describe("CleanupScheduler", () => {
         expect.objectContaining({ jobId: "cap_0000beef" }),
         "Could not remove expired job",
       );
+    });
+
+    // Regression: the job was gone from disk but the registry kept serving it.
+    it("counts a job as removed once the rename has taken it", async () => {
+      jobsThen(["cap_0000beef"]);
+      mockRm.mockRejectedValueOnce(new Error("still locked"));
+      const onJobRemoved = vi.fn();
+      const scheduler = new CleanupScheduler({
+        outputDir: "/data/jobs",
+        ttlSeconds: 3600,
+        logger,
+        onJobRemoved,
+      });
+
+      expect(await scheduler.sweep()).toBe(1);
+      expect(onJobRemoved).toHaveBeenCalledWith("cap_0000beef");
     });
 
     it("finishes a delete that stopped partway", async () => {

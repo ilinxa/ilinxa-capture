@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execFile, spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
-import { copyFile, link, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { copyFile, link, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import sharp from "sharp";
-import { ffmpeg, makeClip, makeCodedClip, startServer, type TestServer } from "./helpers.js";
+import { ffmpeg, makeClip, makeCodedClip, startServer, waitUntil, type TestServer } from "./helpers.js";
 
 const run = promisify(execFile);
 
@@ -59,6 +60,15 @@ describe("review findings (real ffmpeg)", () => {
     return b > g ? "blue" : "green";
   }
 
+  beforeAll(async () => {
+    await ffmpeg(
+      "-f", "lavfi", "-i", "color=c=black:s=160x90:r=25:d=1",
+      "-f", "lavfi", "-i", "sine=d=1",
+      "-map", "0:v", "-map", "1:a", "-c:v", "ffv1", "-c:a", "flac",
+      join(dir, "voice.mkv"),
+    );
+  });
+
   describe("what ffmpeg may be given", () => {
     it.each([
       ["a local path", "C:\\secret\\list.m3u8"],
@@ -67,9 +77,12 @@ describe("review findings (real ffmpeg)", () => {
       ["a concat string", "concat:/a.m3u8"],
       ["a tcp URL", "tcp://127.0.0.1:9/x.m3u8"],
     ])("refuses %s as a format_selector", async (_name, selector) => {
+      // Async, so the answer is the check itself: a selector that got through
+      // would be accepted, and only fail later on the dead port.
       const res = await server.post("/api/v1/video/download", {
         url: "http://127.0.0.1:9/video.mp4",
         format_selector: selector,
+        async: true,
       });
       expect(res.status).toBe(400);
     });
@@ -96,8 +109,198 @@ describe("review findings (real ffmpeg)", () => {
       form.append("file", new Blob([text]), "video.bin");
 
       const res = await fetch(`${server.baseUrl}/api/v1/extract`, { method: "POST", body: form });
-      expect(res.ok).toBe(false);
+      expect(res.status).toBe(400);
     });
+
+    // The list is valid and its target exists beside it, so FFmpeg would read
+    // the other file if the container allowlist did not refuse the list itself.
+    it("refuses a list that names a real file beside it", async () => {
+      const list = join(dir, "list.bin");
+      await writeFile(list, "ffconcat version 1.0\nfile clip.mp4\n");
+
+      const res = await server.post("/api/v1/extract", { source: list, fps: 1 });
+
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: { code: string } }).error.code).toBe(
+        "UNSUPPORTED_FORMAT",
+      );
+    });
+  });
+
+  describe("input that cannot be read", () => {
+    it.each([
+      ["a corrupt file", () => randomBytes(4096)],
+      ["a text file", () => Buffer.from("not a video")],
+    ])("explains %s, without saying where it is", async (_name, bytes) => {
+      const folder = join(dir, "private-folder");
+      await mkdir(folder, { recursive: true });
+      const bad = join(folder, "bad.mp4");
+      await writeFile(bad, bytes());
+
+      for (const route of ["/api/v1/metadata", "/api/v1/extract"]) {
+        const res = await server.post(route, { source: bad, fps: 1 });
+        const { error } = (await res.json()) as { error: { code: string; message: string } };
+
+        expect(res.status).toBe(400);
+        expect(error.code).toBe("UNSUPPORTED_FORMAT");
+        expect(error.message).toContain("Not a readable video");
+        expect(error.message).not.toContain("private-folder");
+      }
+    });
+
+    it("says when a file has sound but no picture", async () => {
+      const sound = join(dir, "sound.mp3");
+      await ffmpeg("-f", "lavfi", "-i", "sine=d=1", sound);
+      const res = await server.post("/api/v1/metadata", { source: sound });
+
+      // mp3 is outside the allowlist, so this is refused rather than probed.
+      expect(res.status).toBe(400);
+    });
+
+    it("says when a container has audio only", async () => {
+      const sound = join(dir, "sound.mkv");
+      await ffmpeg("-f", "lavfi", "-i", "sine=d=1", "-c:a", "flac", sound);
+
+      const res = await server.post("/api/v1/metadata", { source: sound });
+      const { error } = (await res.json()) as { error: { message: string } };
+
+      expect(res.status).toBe(400);
+      expect(error.message).toContain("No video stream");
+    });
+  });
+
+  // ffprobe gives these no duration, and a rate that depends on its version.
+  describe("raw video streams", () => {
+    it.each([
+      ["h264", ["-c:v", "libx264", "-preset", "ultrafast", "-bf", "2"]],
+      ["hevc", ["-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error"]],
+      ["m2v", ["-c:v", "mpeg2video"]],
+    ])("measures a .%s stream", async (ext, encoding) => {
+      const raw = join(dir, `stream.${ext}`);
+      await ffmpeg(
+        "-f", "lavfi",
+        "-i", "testsrc=duration=6:size=160x90:rate=24",
+        "-pix_fmt", "yuv420p",
+        ...encoding,
+        raw,
+      );
+
+      const res = await server.post("/api/v1/metadata", { source: raw });
+      const metadata = (await res.json()) as { duration: number; fps: number };
+
+      expect(res.status).toBe(200);
+      expect(metadata.duration).toBeCloseTo(6, 0);
+      expect(metadata.fps).toBeCloseTo(24, 0);
+
+      const ranged = await server.post("/api/v1/extract", { source: raw, fps: 1, start: 2 });
+      const { frames } = (await ranged.json()) as { frames: { timestamps: number[] } };
+
+      expect(ranged.status).toBe(200);
+      expect(frames.timestamps[0]).toBeCloseTo(2, 1);
+    });
+
+    it("holds a raw stream to the length limit", async () => {
+      const raw = join(dir, "long.h264");
+      await ffmpeg(
+        "-f", "lavfi",
+        "-i", "testsrc=duration=6:size=160x90:rate=24",
+        "-c:v", "libx264", "-preset", "ultrafast",
+        raw,
+      );
+      const limited = await startServer({
+        LOCAL_OUTPUT_DIR: join(dir, "raw-limit"),
+        MAX_VIDEO_DURATION: 5,
+      });
+
+      try {
+        const res = await limited.post("/api/v1/extract", { source: raw, fps: 1 });
+        expect(res.status).toBe(413);
+      } finally {
+        await limited.close();
+      }
+    });
+  });
+
+  describe("a client that hangs up", () => {
+    async function openFiles(): Promise<number> {
+      // Windows has no equivalent, but shows the leak as a job it cannot delete.
+      return process.platform === "linux" ? (await readdir("/proc/self/fd")).length : 0;
+    }
+
+    /** A finished job holding one file too big to fit in the socket buffers. */
+    async function bigJob(id: string, subDir: string, name: string): Promise<void> {
+      await server.app.jobManager.createJob(id, { type: "extract" });
+      await server.app.jobManager.runSync(id, async () => ({}));
+      const folder = join(jobs, id, subDir);
+      await mkdir(folder, { recursive: true });
+      await writeFile(join(folder, name), randomBytes(32 * 1024 * 1024));
+    }
+
+    async function abandon(path: string): Promise<void> {
+      const controller = new AbortController();
+      const res = await fetch(`${server.baseUrl}${path}`, { signal: controller.signal });
+      await res.body!.getReader().read();
+      controller.abort();
+    }
+
+    // Regression: each one leaked a file handle, for good.
+    it.each([
+      ["a ZIP", "cap_0000a001", "frames", "frame_0001.png", "download?include=frames"],
+      ["a video", "cap_0000a002", "video", "clip.mp4", "video"],
+    ])("leaves nothing open after abandoning %s", async (_name, id, subDir, name, route) => {
+      await bigJob(id, subDir, name);
+      const before = await openFiles();
+
+      for (let i = 0; i < 5; i++) await abandon(`/api/v1/jobs/${id}/${route}`);
+
+      await waitUntil(async () => (await openFiles()) <= before + 2, 5000);
+
+      await waitUntil(async () => {
+        const res = await fetch(`${server.baseUrl}/api/v1/jobs/${id}`, { method: "DELETE" });
+        return res.status === 204;
+      }, 5000);
+    });
+
+    // Regression: the job ran on for nobody, holding its slot.
+    it("stops the sync job it was waiting for", async () => {
+      const root = join(dir, "hangup");
+      const limited = await startServer({ LOCAL_OUTPUT_DIR: root, MAX_CONCURRENT_JOBS: 1 });
+      const slow = join(dir, "hangup.mp4");
+      await makeClip(slow, { seconds: 60, size: "1280x720", rate: 30 });
+
+      const readJob = async (id: string): Promise<{ status: string; error_code: string | null }> =>
+        JSON.parse(await readFile(join(root, id, "job.json"), "utf-8")) as {
+          status: string;
+          error_code: string | null;
+        };
+
+      try {
+        const controller = new AbortController();
+        const request = fetch(`${limited.baseUrl}/api/v1/extract`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ source: slow, fps: 30, preset: "high" }),
+          signal: controller.signal,
+        }).catch(() => null);
+
+        let id = "";
+        await waitUntil(async () => {
+          [id = ""] = await readdir(root).catch(() => []);
+          return id !== "" && (await readJob(id).catch(() => null))?.status === "processing";
+        });
+
+        controller.abort();
+        await request;
+
+        await waitUntil(async () => (await readJob(id)).status === "failed");
+        expect((await readJob(id)).error_code).toBe("JOB_CANCELLED");
+
+        const next = await limited.post("/api/v1/extract", { source: clip, fps: 1 });
+        expect(next.status).toBe(200);
+      } finally {
+        await limited.close();
+      }
+    }, 60_000);
   });
 
   describe("audio that outlasts the video", () => {
@@ -300,6 +503,37 @@ describe("review findings (real ffmpeg)", () => {
       // The source is 96 kHz, which mp3 cannot hold.
       expect(audio.sample_rate).toBeLessThanOrEqual(48000);
       expect(audio.duration).toBeCloseTo(2, 0);
+    });
+
+    // Regression: only the maximum was checked, and the encoder refused the
+    // rest when it opened, as a 500 with no reason.
+    it.each(["mp3", "m4a"])("refuses a rate %s does not have, up front", async (format) => {
+      const res = await server.post("/api/v1/audio", {
+        source: join(dir, "voice.mkv"),
+        format,
+        sample_rate: 12345,
+        async: true,
+      });
+      const { error } = (await res.json()) as { error: { message: string } };
+
+      expect(res.status).toBe(400);
+      expect(error.message).toContain("44100");
+    });
+
+    it.each([
+      ["mp3", 22050],
+      ["m4a", 12000],
+      ["flac", 12345],
+    ])("takes %s at %i Hz", async (format, rate) => {
+      const res = await server.post("/api/v1/audio", {
+        source: join(dir, "voice.mkv"),
+        format,
+        sample_rate: rate,
+      });
+      const { audio } = (await res.json()) as { audio: { sample_rate: number } };
+
+      expect(res.status).toBe(200);
+      expect(audio.sample_rate).toBe(rate);
     });
 
     it("reports requested stereo from a mono source", async () => {

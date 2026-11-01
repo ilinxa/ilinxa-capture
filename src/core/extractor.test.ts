@@ -15,13 +15,26 @@ vi.mock("../utils/exec.js", () => ({
 vi.mock("node:fs/promises", () => ({
   mkdir: vi.fn().mockResolvedValue(undefined),
   readdir: vi.fn(),
+  rm: vi.fn().mockResolvedValue(undefined),
 }));
 
 import { execFileAsync } from "../utils/exec.js";
-import { mkdir, readdir } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 
 const mockExec = vi.mocked(execFileAsync);
 const mockReaddir = vi.mocked(readdir);
+
+type ExecOptions = Parameters<typeof execFileAsync>[2];
+
+function printDecoded(opts: ExecOptions, seconds: number): void {
+  opts?.onStdoutLine?.(`frame:0    pts:${Math.round(seconds * 1e6)} pts_time:${seconds}`);
+  opts?.onStdoutLine?.("decoded=1");
+}
+
+function printKept(opts: ExecOptions, index: number, seconds: number): void {
+  opts?.onStdoutLine?.(`frame:${index}    pts:${Math.round(seconds * 1e6)} pts_time:${seconds}`);
+  opts?.onStdoutLine?.("capture=1");
+}
 
 describe("qualityToQscale", () => {
   it("maps 100 to 2 (best quality)", () => {
@@ -48,7 +61,7 @@ describe("buildVideoFilter", () => {
     const preset: ResolvedPreset = { width: null, format: "png", quality: null };
     const filter = buildVideoFilter(5, preset);
     expect(filter).toContain("select='isnan(prev_selected_t)");
-    expect(filter).toContain("floor(t*5+");
+    expect(filter).toContain("floor((t-start_t+0)*5+");
     expect(filter).toContain("metadata=mode=print:file=-");
     expect(filter).not.toMatch(/(^|,)fps=/);
     expect(filter).not.toContain("scale=");
@@ -61,12 +74,28 @@ describe("buildVideoFilter", () => {
 
   it("allows for rounded timestamps when the source rate is known", () => {
     const preset: ResolvedPreset = { width: null, format: "png", quality: null };
-    expect(buildVideoFilter(30, preset, 1 / 30)).toContain("floor((t+0.016333");
+    expect(buildVideoFilter(12, preset, 1 / 24)).toContain("floor((t-start_t+0.0204");
   });
 
   it("accepts a fractional rate", () => {
     const preset: ResolvedPreset = { width: null, format: "png", quality: null };
-    expect(buildVideoFilter(0.2, preset)).toContain("floor(t*0.2+");
+    expect(buildVideoFilter(0.2, preset)).toContain("floor((t-start_t+0)*0.2+");
+  });
+
+  // Regression: a grid as fine as the frames lost some to rounded timestamps.
+  it.each([
+    [24, 1 / 24],
+    [23.98, 1001 / 24000],
+    [60, 1001 / 60000],
+    [30, 1 / 24],
+  ])("keeps every frame when %d fps is the source rate or above", (fps, interval) => {
+    const preset: ResolvedPreset = { width: null, format: "png", quality: null };
+    expect(buildVideoFilter(fps, preset, interval)).not.toContain("select=");
+  });
+
+  it("still samples when the source rate is unknown", () => {
+    const preset: ResolvedPreset = { width: null, format: "png", quality: null };
+    expect(buildVideoFilter(24, preset, 0)).toContain("select=");
   });
 });
 
@@ -98,7 +127,7 @@ describe("buildFfmpegArgs", () => {
       preset: { width: null, format: "png", quality: null },
     });
 
-    expect(args.join(" ")).toContain("floor(t*10+");
+    expect(args.join(" ")).toContain("floor((t-start_t+0)*10+");
     expect(args).not.toContain("-q:v");
     const outputArg = args[args.length - 1];
     expect(outputArg).toMatch(/frame_%04d\.png$/);
@@ -181,12 +210,13 @@ describe("extractFrames", () => {
     ]);
   });
 
-  it("reports each frame's printed time, offset by the range start", async () => {
+  it("reports each frame's printed time, on the source's own clock", async () => {
     mockExec.mockImplementation(async (_cmd, _args, opts) => {
-      opts?.onStdoutLine?.("frame:0    pts:40000   pts_time:0.04");
-      opts?.onStdoutLine?.("capture=1");
+      printDecoded(opts, 99.5);
+      printKept(opts, 0, 100.04);
       // pts_time as FFmpeg 5.1 rounds it. The exact integer must win.
-      opts?.onStdoutLine?.("frame:1    pts:1041667 pts_time:1.04");
+      opts?.onStdoutLine?.("frame:1    pts:101041667 pts_time:101.042");
+      opts?.onStdoutLine?.("capture=1");
       return { stdout: "", stderr: "" };
     });
 
@@ -238,18 +268,149 @@ describe("extractFrames", () => {
     ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
-  it("seeks before the input for a range", () => {
-    const args = buildFfmpegArgs({
+  describe("a range", () => {
+    const range = { start: 100, end: 110 };
+    const base = {
       videoPath: "/tmp/video.mp4",
       outputDir: "/output/frames",
       fps: 1,
-      preset: { width: null, format: "png", quality: null },
-      range: { start: 10, end: 25 },
+      preset: { width: null, format: "png" as const, quality: null },
+    };
+
+    const seeks = (): Array<number | null> =>
+      mockExec.mock.calls.map(([, args]) => {
+        const at = args.indexOf("-ss");
+        return at === -1 ? null : Number(args[at + 1]);
+      });
+
+    // -t counts from the first frame after a seek, wherever that landed, so
+    // the window slid. The range is cut by time instead.
+    it("seeks early, keeps the source clock, and cuts by trim", () => {
+      const args = buildFfmpegArgs({ ...base, range: { start: 10, end: 25 } }, 8);
+
+      expect(args.slice(0, 5)).toEqual([
+        "-copyts",
+        "-start_at_zero",
+        "-noaccurate_seek",
+        "-ss",
+        "8",
+      ]);
+      expect(args.indexOf("-ss")).toBeLessThan(args.indexOf("-i"));
+      expect(args).not.toContain("-t");
+      expect(args.join(" ")).toContain("trim=start_pts=10000000:end_pts=25000000");
     });
 
-    expect(args.indexOf("-ss")).toBeLessThan(args.indexOf("-i"));
-    expect(args[args.indexOf("-ss") + 1]).toBe("10");
-    expect(args[args.indexOf("-t") + 1]).toBe("15");
+    // Without it, MKV's millisecond timestamps land on the same tick of an
+    // encoder running at the source rate, and the run fails.
+    it("gives the encoder a clock finer than any timestamp", () => {
+      const args = buildFfmpegArgs(base);
+
+      expect(args[args.indexOf("-enc_time_base") + 1]).toBe("1:1000000");
+    });
+
+    it("does not seek at all at or before the start of the file", () => {
+      const args = buildFfmpegArgs({ ...base, range: { start: 0, end: 5 } }, 0);
+
+      expect(args).not.toContain("-ss");
+      expect(args).toContain("-copyts");
+    });
+
+    // The source clock fails on joined TS captures, so a whole read stays off it.
+    it("leaves a whole-file read on FFmpeg's own clock", () => {
+      expect(buildFfmpegArgs(base)).not.toContain("-copyts");
+    });
+
+    it("trims before sampling, so sampling starts at the range", () => {
+      const filter = buildVideoFilter(1, base.preset, 0, range);
+
+      expect(filter.indexOf("trim=")).toBeGreaterThan(-1);
+      expect(filter.indexOf("trim=")).toBeLessThan(filter.indexOf("select="));
+    });
+
+    it("runs once when the seek landed at or before the start", async () => {
+      mockExec.mockImplementation(async (_cmd, _args, opts) => {
+        printDecoded(opts, 99.9);
+        return { stdout: "", stderr: "" };
+      });
+      mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
+        ReturnType<typeof readdir>
+      >);
+
+      await extractFrames({ ...base, range, frameInterval: 0.04 });
+
+      expect(seeks()).toEqual([100]);
+    });
+
+    it("backs off further and starts clean when a seek overshot", async () => {
+      mockExec.mockImplementation(async (_cmd, args, opts) => {
+        const seek = Number(args[args.indexOf("-ss") + 1]);
+        printDecoded(opts, seek === 100 ? 101 : 87);
+        if (seek !== 100) printKept(opts, 0, 100);
+        return { stdout: "", stderr: "" };
+      });
+      mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
+        ReturnType<typeof readdir>
+      >);
+
+      const result = await extractFrames({ ...base, range, frameInterval: 0.04 });
+
+      expect(seeks()).toEqual([100, 88]);
+      expect(rm).toHaveBeenCalledWith("/output/frames", { recursive: true, force: true });
+      expect(result.frameTimes).toEqual([100]);
+    });
+
+    // A gap in a variable frame rate source looks like an overshoot if judged
+    // by the first frame kept, and would force a needless full decode.
+    it("is not fooled by a gap after the start", async () => {
+      mockExec.mockImplementation(async (_cmd, _args, opts) => {
+        printDecoded(opts, 99.9);
+        printKept(opts, 0, 104);
+        return { stdout: "", stderr: "" };
+      });
+      mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
+        ReturnType<typeof readdir>
+      >);
+
+      await extractFrames({ ...base, range, frameInterval: 0.04 });
+
+      expect(mockExec).toHaveBeenCalledTimes(1);
+    });
+
+    it("reads a byte-seeking container from a margin before the start", async () => {
+      mockExec.mockImplementation(async (_cmd, _args, opts) => {
+        printDecoded(opts, 97);
+        return { stdout: "", stderr: "" };
+      });
+      mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
+        ReturnType<typeof readdir>
+      >);
+
+      await extractFrames({ ...base, range, format: "mpegts", frameInterval: 0.04 });
+
+      expect(seeks()).toEqual([97]);
+    });
+
+    it("never seeks in a raw stream, which has no timestamps to seek on", async () => {
+      mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+      mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
+        ReturnType<typeof readdir>
+      >);
+
+      await extractFrames({ ...base, range, format: "h264", frameInterval: 0.04 });
+
+      expect(seeks()).toEqual([null]);
+    });
+
+    it("falls back to reading from the start after the last margin", async () => {
+      mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+      mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
+        ReturnType<typeof readdir>
+      >);
+
+      await extractFrames({ ...base, range, frameInterval: 0.04 });
+
+      expect(seeks()).toEqual([100, 88, 4, null]);
+    });
   });
 
   it("surfaces the abort reason rather than a wrapped FFmpeg error", async () => {

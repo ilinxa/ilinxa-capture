@@ -1,14 +1,15 @@
-import { readdir, rename, rm, unlink } from "node:fs/promises";
+import { readdir, rm, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Env } from "../lib/env.js";
 import {
+  FilesInUseError,
   JobBusyError,
   ValidationError,
   VideoTooLongError,
 } from "../utils/errors.js";
-import { MAX_SAMPLE_RATE, extractAudio } from "./audio.js";
+import { SAMPLE_RATES, extractAudio } from "./audio.js";
 import { buildFileUrls } from "./file-urls.js";
-import { composeGrid, type FrameLabel } from "./composer.js";
+import { composeGrid, type CompositionResult, type FrameLabel } from "./composer.js";
 import {
   VIDEO_DOWNLOAD_PRESETS,
   downloadVideo,
@@ -44,6 +45,7 @@ import type {
   VideoDownloadOptions,
 } from "./options.js";
 import { resolvePreset, type PresetName, type ResolvedPreset } from "./presets.js";
+import { buildPath, isFileInUse, replaceDir } from "./safe-fs.js";
 import { detectShots, extractShotFrames, planShotFrames } from "./shots.js";
 import { parseTimecode, resolveRange } from "./timecode.js";
 
@@ -229,7 +231,7 @@ export class CaptureService {
   }
 
   /** Metadata for a path or URL. A URL is a full download, so it queues like a job. */
-  async probe(source: string): Promise<VideoMetadata> {
+  async probe(source: string, caller?: AbortSignal): Promise<VideoMetadata> {
     const input = await this.resolveSource(source);
     if (input.kind !== "url") return this.probeFile(input.path);
 
@@ -242,7 +244,7 @@ export class CaptureService {
           // Temp file cleanup is best-effort
         });
       }
-    });
+    }, caller);
   }
 
   /** Metadata for a file this server already holds, such as an upload. */
@@ -381,6 +383,8 @@ export class CaptureService {
           minShotSeconds: options.min_shot_seconds,
           span,
           range,
+          format: metadata.format,
+          frameInterval: metadata.fps > 0 ? 1 / metadata.fps : 0,
           signal: ctx.signal,
           onProgress: (percent) =>
             report(ctx, run, { stage: "detecting", percent: Math.floor(percent) }),
@@ -396,6 +400,8 @@ export class CaptureService {
           outputDir: join(this.jobs.getJobDir(jobId), "frames"),
           targets,
           preset,
+          format: metadata.format,
+          frameInterval: metadata.fps > 0 ? 1 / metadata.fps : 0,
           signal: ctx.signal,
           onProgress: (percent) =>
             report(ctx, run, { stage: "capturing", percent: Math.floor(percent) }),
@@ -454,10 +460,10 @@ export class CaptureService {
     run: RunOptions = {},
   ): Promise<Submission<AudioResult>> {
     checkTimes(options);
-    const maxRate = MAX_SAMPLE_RATE[options.format];
-    if (maxRate && options.sample_rate && options.sample_rate > maxRate) {
+    const rates = SAMPLE_RATES[options.format];
+    if (rates && options.sample_rate && !rates.includes(options.sample_rate)) {
       throw new ValidationError(
-        `${options.format} supports sample rates up to ${maxRate} Hz`,
+        `${options.format} supports sample rates of ${rates.join(", ")} Hz`,
       );
     }
 
@@ -680,7 +686,9 @@ export class CaptureService {
     }
 
     const cancel = (): void => this.jobs.cancelJob(jobId);
-    run.signal?.addEventListener("abort", cancel, { once: true });
+    // Creating the job took a moment, and the caller may have gone in it.
+    if (run.signal?.aborted) cancel();
+    else run.signal?.addEventListener("abort", cancel, { once: true });
     try {
       return {
         status: "completed",
@@ -752,6 +760,7 @@ export class CaptureService {
       fps,
       preset,
       range,
+      format: metadata.format,
       durationSeconds: range ? range.end - range.start : metadata.duration,
       frameInterval: metadata.fps > 0 ? 1 / metadata.fps : 0,
       signal: ctx.signal,
@@ -784,31 +793,33 @@ export class CaptureService {
   ): Promise<SheetSet> {
     // Built aside and swapped in, so a failed compose leaves earlier sheets alone.
     const sheetsDir = join(this.jobs.getJobDir(jobId), "sheets");
-    const buildDir = `${sheetsDir}.tmp`;
+    const buildDir = buildPath(sheetsDir);
     await rm(buildDir, { recursive: true, force: true });
 
-    const result = await composeGrid({
-      frameFiles,
-      outputDir: buildDir,
-      mode: options.mode as 1 | 4 | 16,
-      overlays: {
-        frameNumber: options.overlay_frame_number,
-        timestamp: options.overlay_timestamp,
-      },
-      fps,
-      labels,
-      maxSheetEdge,
-      trustedFrames: manifest !== null && manifest.frames.length > 0,
-      signal: ctx.signal,
-      onProgress: (percent) =>
-        report(ctx, run, { stage: "composing", percent: Math.floor(percent) }),
-    }).catch(async (err: unknown) => {
+    let result: CompositionResult;
+    try {
+      result = await composeGrid({
+        frameFiles,
+        outputDir: buildDir,
+        mode: options.mode as 1 | 4 | 16,
+        overlays: {
+          frameNumber: options.overlay_frame_number,
+          timestamp: options.overlay_timestamp,
+        },
+        fps,
+        labels,
+        maxSheetEdge,
+        trustedFrames: manifest !== null && manifest.frames.length > 0,
+        signal: ctx.signal,
+        onProgress: (percent) =>
+          report(ctx, run, { stage: "composing", percent: Math.floor(percent) }),
+      });
+      await replaceDir(sheetsDir);
+    } catch (err) {
       await rm(buildDir, { recursive: true, force: true }).catch(() => {});
-      throw err;
-    });
+      throw isFileInUse(err) ? new FilesInUseError(jobId) : err;
+    }
 
-    await rm(sheetsDir, { recursive: true, force: true });
-    await rename(buildDir, sheetsDir);
     const sheetFiles = result.sheetFiles.map((file) =>
       join(sheetsDir, basename(file)),
     );

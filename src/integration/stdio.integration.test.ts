@@ -192,12 +192,16 @@ describe("MCP over stdio (real process)", () => {
       async: true,
     });
 
+    // Against the clock: FFmpeg's first report takes half a second, and a fast
+    // machine gets through any fixed number of calls sooner than that.
     let progress: { stage: string; percent: number | null } | null = null;
-    for (let i = 0; i < 400 && progress === null; i++) {
+    const deadline = Date.now() + 20_000;
+    while (progress === null && Date.now() < deadline) {
       const job = await call<{ progress: typeof progress }>("capture_job_status", {
         job_id: jobId,
       });
       progress = job.progress;
+      if (progress === null) await new Promise((r) => setTimeout(r, 25));
     }
 
     expect(progress).toMatchObject({ stage: "extracting" });
@@ -210,6 +214,9 @@ describe("MCP over stdio (real process)", () => {
     const slow = join(dir, "cancel.mp4");
     await makeClip(slow, { seconds: 60, size: "1280x720", rate: 30 });
 
+    const jobsDir = join(home, ".ilinxa-capture", "jobs");
+    const before = new Set(await readdir(jobsDir));
+
     const controller = new AbortController();
     const started = client
       .callTool(
@@ -219,8 +226,6 @@ describe("MCP over stdio (real process)", () => {
       )
       .catch((err: unknown) => err);
 
-    const jobsDir = join(home, ".ilinxa-capture", "jobs");
-    const before = new Set(await readdir(jobsDir));
     let jobId: string | undefined;
     for (let i = 0; i < 200 && !jobId; i++) {
       await new Promise((r) => setTimeout(r, 25));
@@ -394,6 +399,66 @@ describe("MCP over stdio (real process)", () => {
       expect((JSON.parse(line) as { jsonrpc: string }).jsonrpc).toBe("2.0");
     }
   }, 60_000);
+
+  // Regression: closing stdin alone left the server up until its job finished.
+  // Only a raw test can show this: the SDK client also ends the process itself.
+  it("exits on stdin EOF alone, stopping a running job", async () => {
+    const slow = join(dir, "eof.mp4");
+    await makeClip(slow, { seconds: 90, size: "1280x720", rate: 30 });
+
+    const child = spawn(
+      process.execPath,
+      [join(REPO, "node_modules", "tsx", "dist", "cli.mjs"), join(REPO, "src", "mcp-entry.ts")],
+      {
+        cwd: home,
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
+
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+    const exited = new Promise<string>((done) => child.once("exit", () => done("exited")));
+
+    const send = (message: unknown): void => {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    };
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "raw", version: "0" },
+      },
+    });
+    send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    send({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "capture_extract",
+        arguments: { source: slow, fps: 30, preset: "high", async: true },
+      },
+    });
+
+    for (let i = 0; i < 600 && !stdout.includes('"id":2'); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    expect(stdout).toContain('"id":2');
+
+    child.stdin.end();
+
+    const outcome = await Promise.race([
+      exited,
+      new Promise<string>((done) => setTimeout(() => done("still running"), 5000)),
+    ]);
+    child.kill();
+
+    expect(outcome).toBe("exited");
+  }, 90_000);
 
   // Regression: with the client gone, a job kept running for nobody.
   it("exits when the client goes away, stopping any running job", async () => {

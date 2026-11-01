@@ -1,14 +1,19 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
 import { ProcessingError, ValidationError } from "../utils/errors.js";
 import {
   EXACT_TIMEBASE_FILTER,
-  MEDIA_INPUT_OPTIONS,
+  FIRST_DECODED_FILTER,
   PRINT_PTS_FILTER,
+  createFrameReader,
   mediaInputArgs,
   parsePtsLine,
   runFfmpeg,
+  seekMargins,
+  seekOvershot,
+  seekPoint,
+  trimFilter,
   type TimeRange,
 } from "./ffmpeg.js";
 import type { ResolvedPreset } from "./presets.js";
@@ -20,10 +25,6 @@ const MAX_FRAME_WORKERS = 4;
 
 // Small enough for scene scoring to be fast; large enough to keep the cuts.
 const DETECT_WIDTH = 320;
-
-// Times are whole microseconds, so seek a hair early to land on the wanted frame
-// rather than the one after it. Far less than one frame even at 240 fps.
-const SEEK_LEAD_SECONDS = 0.0005;
 
 const SCENE_SCORE_LINE = /^lavfi\.scene_score=([\d.]+)/;
 
@@ -51,6 +52,8 @@ export interface DetectShotsOptions {
   /** Timeline to cover: the given range, or the whole file. */
   span: TimeRange;
   range?: TimeRange | undefined;
+  format?: string | undefined;
+  frameInterval?: number | undefined;
   signal?: AbortSignal | undefined;
   onProgress?: ((percent: number) => void) | undefined;
 }
@@ -93,9 +96,8 @@ export function buildShots(
 
 /** Find shot boundaries with FFmpeg's scene score. Decodes the whole span. */
 export async function detectShots(opts: DetectShotsOptions): Promise<Shot[]> {
-  const offset = opts.range?.start ?? 0;
-  const cuts: number[] = [];
-  const frameBeforeCut = new Map<number, number>();
+  let cuts: number[] = [];
+  let frameBeforeCut = new Map<number, number>();
   let previous: number | null = null;
   let current: number | null = null;
 
@@ -103,55 +105,77 @@ export async function detectShots(opts: DetectShotsOptions): Promise<Shot[]> {
   // container's duration is not where the video ends (audio can run on), and a
   // variable frame rate leaves no way to compute the frame before a cut.
   const filter = [
-    EXACT_TIMEBASE_FILTER,
+    ...(opts.range
+      ? [FIRST_DECODED_FILTER, trimFilter(opts.range.start, opts.range.end)]
+      : [EXACT_TIMEBASE_FILTER]),
     `scale=${DETECT_WIDTH}:-2`,
     "select='gte(scene,0)'",
     "metadata=mode=print:key=lavfi.scene_score:file=-",
   ].join(",");
 
-  try {
-    await runFfmpeg(
-      [
-        ...mediaInputArgs(opts.videoPath, opts.range),
-        "-vf", filter,
-        "-fps_mode", "passthrough",
-        "-an",
-        "-sn",
-        "-f", "null",
-        "-",
-      ],
-      {
-        signal: opts.signal,
-        durationSeconds: opts.span.end - opts.span.start,
-        onProgress: opts.onProgress,
-        onStdoutLine: (line) => {
-          const pts = parsePtsLine(line);
-          if (pts !== null) {
-            previous = current;
-            current = pts + offset;
-            return;
-          }
+  const target = opts.range?.start ?? 0;
+  for (const margin of opts.range ? seekMargins(opts.format) : [Infinity]) {
+    const seek = opts.range ? seekPoint(target, margin) : undefined;
+    cuts = [];
+    frameBeforeCut = new Map();
+    previous = null;
+    current = null;
+    let linePts: number | null = null;
+    let firstDecoded: number | null = null;
 
-          const score = SCENE_SCORE_LINE.exec(line);
-          if (
-            score &&
-            Number(score[1]) > opts.threshold &&
-            current !== null &&
-            previous !== null
-          ) {
-            cuts.push(current);
-            frameBeforeCut.set(current, previous);
-          }
+    try {
+      await runFfmpeg(
+        [
+          ...mediaInputArgs(opts.videoPath, seek),
+          "-vf", filter,
+          "-fps_mode", "passthrough",
+          "-an",
+          "-sn",
+          "-f", "null",
+          "-",
+        ],
+        {
+          signal: opts.signal,
+          durationSeconds: opts.span.end - opts.span.start,
+          onProgress: opts.onProgress,
+          onStdoutLine: (line) => {
+            const pts = parsePtsLine(line);
+            if (pts !== null) {
+              linePts = pts;
+              return;
+            }
+            if (line.startsWith("decoded=1")) {
+              firstDecoded ??= linePts;
+              return;
+            }
+
+            const score = SCENE_SCORE_LINE.exec(line);
+            if (score) {
+              previous = current;
+              current = linePts;
+              if (
+                Number(score[1]) > opts.threshold &&
+                current !== null &&
+                previous !== null
+              ) {
+                cuts.push(current);
+                frameBeforeCut.set(current, previous);
+              }
+            }
+          },
         },
-      },
-    );
-  } catch (err) {
-    if (opts.signal?.aborted) throw opts.signal.reason;
-    if (current === null && opts.range) {
-      throw new ValidationError("No video frames in the requested range");
+      );
+    } catch (err) {
+      if (opts.signal?.aborted) throw opts.signal.reason;
+      if (current === null && opts.range) {
+        if (seek !== undefined && seek > 0) continue;
+        throw new ValidationError("No video frames in the requested range");
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ProcessingError(`Shot detection failed: ${message}`);
     }
-    const message = err instanceof Error ? err.message : String(err);
-    throw new ProcessingError(`Shot detection failed: ${message}`);
+
+    if (!seekOvershot(seek, firstDecoded, target, opts.frameInterval ?? 0)) break;
   }
 
   if (current === null) {
@@ -164,7 +188,8 @@ export async function detectShots(opts: DetectShotsOptions): Promise<Shot[]> {
 
   // One frame's length past the last frame is where the video really ends.
   const lastFrame: number = current;
-  const frameLength = previous === null ? 0 : lastFrame - previous;
+  const frameLength =
+    previous === null ? (opts.frameInterval ?? 0) : lastFrame - previous;
   const videoEnd = lastFrame + frameLength;
 
   return buildShots(
@@ -228,15 +253,24 @@ export interface ShotFramesOptions {
   outputDir: string;
   targets: ShotFrameTarget[];
   preset: ResolvedPreset;
+  format?: string | undefined;
+  frameInterval?: number | undefined;
   signal?: AbortSignal | undefined;
   onProgress?: ((percent: number) => void) | undefined;
 }
 
-function frameFilter(preset: ResolvedPreset): string {
+function frameFilter(preset: ResolvedPreset, target: number): string {
   return [
+    FIRST_DECODED_FILTER,
+    trimFilter(target),
     PRINT_PTS_FILTER,
     ...(preset.width !== null ? [`scale=${preset.width}:-2`] : []),
   ].join(",");
+}
+
+/** Which seek margin to try first. Shared, because a source needing a wide one needs it for every grab. */
+interface SeekMemory {
+  from: number;
 }
 
 /**
@@ -244,44 +278,49 @@ function frameFilter(preset: ResolvedPreset): string {
  * some encoders fail rather than finish when no frame ever reaches them.
  */
 async function grabFrame(
-  videoPath: string,
-  seek: number,
+  target: number,
   outputPath: string,
-  preset: ResolvedPreset,
+  opts: ShotFramesOptions,
+  memory: SeekMemory,
   signal: AbortSignal | undefined,
 ): Promise<number | null> {
-  const start = Math.max(0, seek - SEEK_LEAD_SECONDS);
-  let pts: number | null = null;
+  const { preset } = opts;
+  const margins = seekMargins(opts.format);
 
-  try {
-    await runFfmpeg(
-    [
-      "-ss", String(start),
-      ...MEDIA_INPUT_OPTIONS,
-      "-i", videoPath,
-      "-vf", frameFilter(preset),
-      "-frames:v", "1",
-      "-fps_mode", "passthrough",
-      "-an",
-      "-y",
-      ...(preset.format === "jpeg" && preset.quality !== null
-        ? ["-q:v", String(qualityToQscale(preset.quality))]
-        : []),
-      outputPath,
-    ],
-    {
-      signal,
-      onStdoutLine: (line) => {
-        pts ??= parsePtsLine(line);
-      },
-    },
-    );
-  } catch (err) {
-    if (pts !== null || signal?.aborted) throw err;
-    return null;
+  for (let attempt = memory.from; attempt < margins.length; attempt++) {
+    const seek = seekPoint(target, margins[attempt]!);
+    const reader = createFrameReader();
+
+    try {
+      await runFfmpeg(
+        [
+          ...mediaInputArgs(opts.videoPath, seek),
+          "-vf", frameFilter(preset, target),
+          "-frames:v", "1",
+          "-fps_mode", "passthrough",
+          "-an",
+          "-y",
+          ...(preset.format === "jpeg" && preset.quality !== null
+            ? ["-q:v", String(qualityToQscale(preset.quality))]
+            : []),
+          outputPath,
+        ],
+        { signal, onStdoutLine: reader.onLine },
+      );
+    } catch (err) {
+      if (reader.times.length > 0 || signal?.aborted) throw err;
+      if (seek > 0) continue;
+      return null;
+    }
+
+    if (!seekOvershot(seek, reader.firstDecoded(), target, opts.frameInterval ?? 0)) {
+      const time = reader.times[0] ?? null;
+      if (time !== null) memory.from = Math.max(memory.from, attempt);
+      return time;
+    }
   }
 
-  return pts === null ? null : start + pts;
+  return null;
 }
 
 /**
@@ -302,6 +341,8 @@ export async function extractShotFrames(
 
   const ext = opts.preset.format === "png" ? "png" : "jpg";
   const results: Array<ShotFrame | null> = opts.targets.map(() => null);
+  const memory: SeekMemory = { from: 0 };
+  const tolerance = (opts.frameInterval ?? 0) / 2;
   let nextTarget = 0;
   let finished = 0;
 
@@ -313,23 +354,17 @@ export async function extractShotFrames(
       const file = join(opts.outputDir, name);
 
       try {
-        let time = await grabFrame(
-          opts.videoPath,
-          target.time,
-          file,
-          opts.preset,
-          signal,
-        );
+        let time = await grabFrame(target.time, file, opts, memory, signal);
 
         // A gap in the source can carry a seek past the cut into the next shot.
-        if (time === null || time > target.latest + SEEK_LEAD_SECONDS) {
-          time = await grabFrame(
-            opts.videoPath,
-            target.latest,
-            file,
-            opts.preset,
-            signal,
-          );
+        if (time === null || time > target.latest) {
+          time = await grabFrame(target.latest, file, opts, memory, signal);
+        }
+
+        // No frame beats a frame of the next shot labelled as this one.
+        if (time !== null && time > target.latest + tolerance) {
+          await rm(file, { force: true });
+          time = null;
         }
 
         if (time !== null) {
