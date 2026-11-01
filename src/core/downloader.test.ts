@@ -7,8 +7,8 @@ import {
   VIDEO_DOWNLOAD_PRESETS,
 } from "./downloader.js";
 
-vi.mock("node:child_process", () => ({
-  execFile: vi.fn(),
+vi.mock("../utils/exec.js", () => ({
+  execFileAsync: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -21,10 +21,10 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
 });
 
-import { execFile } from "node:child_process";
+import { execFileAsync } from "../utils/exec.js";
 import { readdir, stat } from "node:fs/promises";
 
-const mockExecFile = vi.mocked(execFile);
+const mockExec = vi.mocked(execFileAsync);
 const mockReaddir = vi.mocked(readdir);
 const mockStat = vi.mocked(stat);
 
@@ -60,19 +60,12 @@ describe("downloadVideo", () => {
   });
 
   it("calls yt-dlp with correct arguments", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
 
     const result = await downloadVideo("https://youtube.com/watch?v=abc");
 
-    expect(mockExecFile).toHaveBeenCalledTimes(1);
-    const call = mockExecFile.mock.calls[0]!;
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    const call = mockExec.mock.calls[0]!;
     expect(call[0]).toBe("yt-dlp");
 
     const args = call[1] as string[];
@@ -86,14 +79,7 @@ describe("downloadVideo", () => {
   });
 
   it("returns a temp file path", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
 
     const result = await downloadVideo("https://example.com/video.mp4");
     expect(typeof result).toBe("string");
@@ -102,14 +88,7 @@ describe("downloadVideo", () => {
   });
 
   it("throws DownloadFailedError on yt-dlp failure", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: Error, stdout: string, stderr: string) => void)(
-        new Error("yt-dlp crashed"),
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockRejectedValue(new Error("yt-dlp crashed"));
 
     await expect(
       downloadVideo("https://example.com/video.mp4"),
@@ -125,10 +104,7 @@ describe("listVideoFormats", () => {
   });
 
   it("parses yt-dlp --dump-json output", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        JSON.stringify({
+    mockExec.mockResolvedValue({ stdout: JSON.stringify({
           title: "Test Video",
           duration: 120,
           formats: [
@@ -146,11 +122,7 @@ describe("listVideoFormats", () => {
               resolution: "640x360",
             },
           ],
-        }),
-        "",
-      );
-      return undefined as never;
-    });
+        }), stderr: "" });
 
     const result = await listVideoFormats("https://youtube.com/watch?v=abc");
 
@@ -162,10 +134,7 @@ describe("listVideoFormats", () => {
   });
 
   it("filters out storyboard formats", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        JSON.stringify({
+    mockExec.mockResolvedValue({ stdout: JSON.stringify({
           title: "Test",
           duration: 60,
           formats: [
@@ -186,11 +155,7 @@ describe("listVideoFormats", () => {
               resolution: "160x90",
             },
           ],
-        }),
-        "",
-      );
-      return undefined as never;
-    });
+        }), stderr: "" });
 
     const result = await listVideoFormats("https://example.com/v");
     expect(result.formats).toHaveLength(1);
@@ -198,14 +163,7 @@ describe("listVideoFormats", () => {
   });
 
   it("throws FormatListingFailedError on yt-dlp failure", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: Error, stdout: string, stderr: string) => void)(
-        new Error("yt-dlp crashed"),
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockRejectedValue(new Error("yt-dlp crashed"));
 
     await expect(
       listVideoFormats("https://example.com/v"),
@@ -213,14 +171,7 @@ describe("listVideoFormats", () => {
   });
 
   it("throws on invalid JSON", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "not json",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "not json", stderr: "" });
 
     await expect(
       listVideoFormats("https://example.com/v"),
@@ -228,18 +179,11 @@ describe("listVideoFormats", () => {
   });
 
   it("calls yt-dlp with --dump-json --no-playlist", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        JSON.stringify({ title: "T", duration: 1, formats: [] }),
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: JSON.stringify({ title: "T", duration: 1, formats: [] }), stderr: "" });
 
     await listVideoFormats("https://example.com/v");
 
-    const call = mockExecFile.mock.calls[0]!;
+    const call = mockExec.mock.calls[0]!;
     expect(call[0]).toBe("yt-dlp");
     const args = call[1] as string[];
     expect(args).toContain("--dump-json");
@@ -256,25 +200,18 @@ describe("downloadVideoWithFormat", () => {
   });
 
   it("calls yt-dlp with format selector and merge format", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
     mockReaddir.mockResolvedValue(["My Video.mp4"] as unknown as never);
     mockStat.mockResolvedValue({ size: 12345678 } as never);
 
     const result = await downloadVideoWithFormat({
       url: "https://example.com/v",
-      outputDir: "/data/jobs/cap_test/video",
+      outputDir: "/data/jobs/cap_0000beef/video",
       formatSelector: "bestvideo[height<=720]+bestaudio/best[height<=720]",
       mergeFormat: "mp4",
     });
 
-    const call = mockExecFile.mock.calls[0]!;
+    const call = mockExec.mock.calls[0]!;
     const args = call[1] as string[];
     expect(args).toContain("-f");
     expect(args).toContain("bestvideo[height<=720]+bestaudio/best[height<=720]");
@@ -288,37 +225,23 @@ describe("downloadVideoWithFormat", () => {
   });
 
   it("uses defaults when no formatSelector or mergeFormat provided", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
     mockReaddir.mockResolvedValue(["video.mp4"] as unknown as never);
     mockStat.mockResolvedValue({ size: 100 } as never);
 
     await downloadVideoWithFormat({
       url: "https://example.com/v",
-      outputDir: "/data/jobs/cap_test/video",
+      outputDir: "/data/jobs/cap_0000beef/video",
     });
 
-    const call = mockExecFile.mock.calls[0]!;
+    const call = mockExec.mock.calls[0]!;
     const args = call[1] as string[];
     expect(args).toContain("bestvideo+bestaudio/best");
     expect(args).toContain("mp4");
   });
 
   it("throws DownloadFailedError on yt-dlp failure", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: Error, stdout: string, stderr: string) => void)(
-        new Error("download failed"),
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockRejectedValue(new Error("download failed"));
 
     await expect(
       downloadVideoWithFormat({
@@ -329,14 +252,7 @@ describe("downloadVideoWithFormat", () => {
   });
 
   it("uses --extract-audio --audio-format for mp3 mergeFormat", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
     mockReaddir.mockResolvedValue(["song.mp3"] as unknown as never);
     mockStat.mockResolvedValue({ size: 5000 } as never);
 
@@ -347,7 +263,7 @@ describe("downloadVideoWithFormat", () => {
       mergeFormat: "mp3",
     });
 
-    const call = mockExecFile.mock.calls[0]!;
+    const call = mockExec.mock.calls[0]!;
     const args = call[1] as string[];
     expect(args).toContain("--extract-audio");
     expect(args).toContain("--audio-format");
@@ -356,14 +272,7 @@ describe("downloadVideoWithFormat", () => {
   });
 
   it("throws when no output file found", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
     mockReaddir.mockResolvedValue([] as unknown as never);
 
     await expect(

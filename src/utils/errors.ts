@@ -13,6 +13,25 @@ export const UnsupportedFormatError = createError(
   400,
 );
 
+// 403 Forbidden
+export const ForbiddenHostError = createError(
+  "FORBIDDEN_HOST",
+  "Host '%s' is not allowed. Add it to ALLOWED_HOSTS to reach this server by that name",
+  403,
+);
+
+export const ForbiddenOriginError = createError(
+  "FORBIDDEN_ORIGIN",
+  "Origin '%s' is not allowed. Add it to ALLOWED_ORIGINS to call this server from that site",
+  403,
+);
+
+export const LocalPathForbiddenError = createError(
+  "LOCAL_PATH_FORBIDDEN",
+  "Local path is outside the allowed folders. Upload the file, or set ALLOWED_INPUT_DIRS",
+  403,
+);
+
 // 404 Not Found
 export const JobNotFoundError = createError(
   "JOB_NOT_FOUND",
@@ -24,6 +43,19 @@ export const FileNotFoundError = createError(
   "FILE_NOT_FOUND",
   "File '%s' not found in job '%s'",
   404,
+);
+
+// 409 Conflict
+export const JobBusyError = createError(
+  "JOB_BUSY",
+  "Job '%s' is still running",
+  409,
+);
+
+export const JobCancelledError = createError(
+  "JOB_CANCELLED",
+  "Job '%s' was cancelled",
+  409,
 );
 
 // 410 Gone
@@ -38,6 +70,13 @@ export const VideoTooLongError = createError(
   "VIDEO_TOO_LONG",
   "Video duration exceeds maximum of %s seconds",
   413,
+);
+
+// 504 Gateway Timeout
+export const JobTimeoutError = createError(
+  "JOB_TIMEOUT",
+  "Job exceeded the JOB_TIMEOUT limit of %s seconds and was stopped",
+  504,
 );
 
 // 500 Internal Server Error

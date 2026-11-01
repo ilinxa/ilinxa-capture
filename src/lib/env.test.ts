@@ -19,13 +19,13 @@ describe("loadEnv", () => {
     const env = loadEnv();
 
     expect(env.PORT).toBe(3000);
-    expect(env.HOST).toBe("0.0.0.0");
+    expect(env.HOST).toBe("127.0.0.1");
     // Vitest sets NODE_ENV=test automatically
     expect(env.NODE_ENV).toBe("test");
     expect(env.LOG_LEVEL).toBe("info");
     expect(env.STORAGE_MODE).toBe("local");
     expect(env.LOCAL_OUTPUT_DIR).toBe("./data/jobs");
-    expect(env.LOCAL_TTL_SECONDS).toBe(3600);
+    expect(env.LOCAL_TTL_SECONDS).toBe(86400);
     expect(env.MAX_VIDEO_DURATION).toBe(600);
     expect(env.MAX_UPLOAD_SIZE).toBe(524288000);
     expect(env.MAX_CONCURRENT_JOBS).toBe(3);

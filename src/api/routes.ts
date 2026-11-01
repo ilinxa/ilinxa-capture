@@ -2,8 +2,9 @@ import type { FastifyInstance } from "fastify";
 import type { Env } from "../lib/env.js";
 import type { JobManager } from "../core/job-manager.js";
 import type { Storage } from "../core/storage.js";
+import type { CaptureService } from "../core/service.js";
 import { healthCheckHandler, healthResponseSchema } from "./health.handler.js";
-import { metadataHandler } from "./metadata.handler.js";
+import { createMetadataHandler } from "./metadata.handler.js";
 import { createExtractHandler } from "./extract.handler.js";
 import { createComposeHandler } from "./compose.handler.js";
 import { createCombinedHandler } from "./combined.handler.js";
@@ -35,6 +36,7 @@ interface RouteOptions {
   env: Env;
   jobManager: JobManager;
   storage: Storage;
+  service: CaptureService;
 }
 
 export async function registerRoutes(
@@ -58,7 +60,7 @@ export async function registerRoutes(
         response: { 200: metadataResponseSchema },
       },
     },
-    metadataHandler,
+    createMetadataHandler(opts.service),
   );
 
   app.post(
@@ -71,7 +73,7 @@ export async function registerRoutes(
         },
       },
     },
-    createExtractHandler(opts.env, opts.jobManager),
+    createExtractHandler(opts.service),
   );
 
   app.post(
@@ -84,7 +86,7 @@ export async function registerRoutes(
         },
       },
     },
-    createComposeHandler(opts.env, opts.jobManager),
+    createComposeHandler(opts.service),
   );
 
   app.post(
@@ -97,7 +99,7 @@ export async function registerRoutes(
         },
       },
     },
-    createCombinedHandler(opts.env, opts.jobManager),
+    createCombinedHandler(opts.service),
   );
 
   app.get(
@@ -171,7 +173,7 @@ export async function registerRoutes(
         },
       },
     },
-    createVideoDownloadHandler(opts.env, opts.jobManager),
+    createVideoDownloadHandler(opts.service),
   );
 
   app.get(

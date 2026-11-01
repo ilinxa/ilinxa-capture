@@ -1,6 +1,7 @@
 import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { isValidJobId } from "./job-id.js";
 
 interface MinimalLogger {
   info(msg: string): void;
@@ -13,6 +14,8 @@ interface CleanupOptions {
   ttlSeconds: number;
   intervalMs?: number;
   logger: MinimalLogger;
+  /** Called after a job directory is removed, so the registry stays in step. */
+  onJobRemoved?: (jobId: string) => void;
 }
 
 export class CleanupScheduler {
@@ -20,6 +23,7 @@ export class CleanupScheduler {
   private readonly ttlMs: number;
   private readonly intervalMs: number;
   private readonly logger: MinimalLogger;
+  private readonly onJobRemoved: ((jobId: string) => void) | undefined;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: CleanupOptions) {
@@ -27,6 +31,7 @@ export class CleanupScheduler {
     this.ttlMs = opts.ttlSeconds * 1000;
     this.intervalMs = opts.intervalMs ?? 60_000;
     this.logger = opts.logger;
+    this.onJobRemoved = opts.onJobRemoved;
   }
 
   start(): void {
@@ -62,6 +67,9 @@ export class CleanupScheduler {
     let cleaned = 0;
 
     for (const entry of entries) {
+      // Only ever touch directories named like our own jobs.
+      if (!isValidJobId(entry)) continue;
+
       const jobJsonPath = join(this.outputDir, entry, "job.json");
 
       let content: string;
@@ -121,6 +129,7 @@ export class CleanupScheduler {
       if (now - terminalTime < this.ttlMs) continue;
 
       await rm(join(this.outputDir, entry), { recursive: true, force: true });
+      this.onJobRemoved?.(entry);
       cleaned++;
     }
 

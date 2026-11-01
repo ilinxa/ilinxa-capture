@@ -49,7 +49,8 @@ export interface DownloadWithFormatOptions {
   outputDir: string;
   formatSelector?: string;
   mergeFormat?: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string> | undefined;
+  signal?: AbortSignal | undefined;
 }
 
 export interface DownloadedVideoInfo {
@@ -95,6 +96,8 @@ export const VIDEO_DOWNLOAD_PRESETS: Record<
   },
 };
 
+const METADATA_TIMEOUT_MS = 2 * 60 * 1000;
+
 // ─── Helpers ────────────────────────────────────────────────────────
 
 /**
@@ -110,16 +113,20 @@ export function isUrl(source: string): boolean {
  * Download a video from a URL using yt-dlp.
  * Returns the path to the downloaded file. Caller is responsible for cleanup.
  */
-export async function downloadVideo(url: string): Promise<string> {
+export async function downloadVideo(
+  url: string,
+  opts: { signal?: AbortSignal | undefined } = {},
+): Promise<string> {
   const outputPath = join(tmpdir(), `ilinxa-capture-dl-${randomUUID()}.mp4`);
 
   try {
     await execFileAsync(
       "yt-dlp",
-      ["-o", outputPath, "--no-playlist", "--merge-output-format", "mp4", url],
-      { maxBuffer: 10 * 1024 * 1024 },
+      ["-o", outputPath, "--no-playlist", "--merge-output-format", "mp4", "--", url],
+      { maxBuffer: 10 * 1024 * 1024, signal: opts.signal },
     );
   } catch (err) {
+    if (opts.signal?.aborted) throw opts.signal.reason;
     const message = err instanceof Error ? err.message : String(err);
     throw new DownloadFailedError(message);
   }
@@ -158,9 +165,10 @@ function hlsPlaylistToVideoFormatInfo(playlist: HlsPlaylistInfo): VideoFormatInf
 export async function listVideoFormats(
   url: string,
   headers?: Record<string, string>,
+  signal: AbortSignal = AbortSignal.timeout(METADATA_TIMEOUT_MS),
 ): Promise<VideoFormatInfo> {
   if (isHlsUrl(url)) {
-    const playlist = await parseHlsMasterPlaylist(url, headers);
+    const playlist = await parseHlsMasterPlaylist(url, headers, signal);
     return hlsPlaylistToVideoFormatInfo(playlist);
   }
 
@@ -168,8 +176,8 @@ export async function listVideoFormats(
   try {
     const result = await execFileAsync(
       "yt-dlp",
-      ["--dump-json", "--no-playlist", url],
-      { maxBuffer: 10 * 1024 * 1024 },
+      ["--dump-json", "--no-playlist", "--", url],
+      { maxBuffer: 10 * 1024 * 1024, signal },
     );
     stdout = result.stdout;
   } catch (err) {
@@ -232,6 +240,7 @@ export async function downloadVideoWithFormat(
     formatSelector = "bestvideo+bestaudio/best",
     mergeFormat = "mp4",
     headers,
+    signal,
   } = opts;
 
   await mkdir(outputDir, { recursive: true });
@@ -245,6 +254,7 @@ export async function downloadVideoWithFormat(
       isHlsUrl(formatSelector) ? formatSelector : url,
       outputPath,
       headers,
+      signal,
     );
 
     const fileStat = await stat(outputPath);
@@ -266,11 +276,15 @@ export async function downloadVideoWithFormat(
   } else {
     args.push("--merge-output-format", mergeFormat);
   }
-  args.push(url);
+  args.push("--", url);
 
   try {
-    await execFileAsync("yt-dlp", args, { maxBuffer: 10 * 1024 * 1024 });
+    await execFileAsync("yt-dlp", args, {
+      maxBuffer: 10 * 1024 * 1024,
+      signal,
+    });
   } catch (err) {
+    if (signal?.aborted) throw signal.reason;
     const message = err instanceof Error ? err.message : String(err);
     throw new DownloadFailedError(message);
   }

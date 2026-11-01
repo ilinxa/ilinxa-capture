@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { PassThrough } from "node:stream";
 import { buildApp } from "../app.js";
-import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 import type { Storage, FileInfo } from "../core/storage.js";
 import type { ReadStream } from "node:fs";
 
@@ -41,31 +41,6 @@ import { extractFrames } from "../core/extractor.js";
 const mockGetVideoMetadata = vi.mocked(getVideoMetadata);
 const mockExtractFrames = vi.mocked(extractFrames);
 
-function createTestEnv(overrides?: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "0.0.0.0",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
-    UI_DIR: "./ui/dist",
-    ...overrides,
-  };
-}
-
 function createFakeStream(data = "fake file data"): ReadStream {
   const stream = new PassThrough();
   stream.end(Buffer.from(data));
@@ -73,12 +48,12 @@ function createFakeStream(data = "fake file data"): ReadStream {
 }
 
 const sampleFrameFiles: FileInfo[] = [
-  { path: "/data/jobs/cap_test/frames/frame_0001.jpg", relativePath: "frames/frame_0001.jpg", size: 1000 },
-  { path: "/data/jobs/cap_test/frames/frame_0002.jpg", relativePath: "frames/frame_0002.jpg", size: 1000 },
+  { path: "/data/jobs/cap_0000beef/frames/frame_0001.jpg", relativePath: "frames/frame_0001.jpg", size: 1000 },
+  { path: "/data/jobs/cap_0000beef/frames/frame_0002.jpg", relativePath: "frames/frame_0002.jpg", size: 1000 },
 ];
 
 const sampleSheetFiles: FileInfo[] = [
-  { path: "/data/jobs/cap_test/sheets/sheet_001.jpg", relativePath: "sheets/sheet_001.jpg", size: 2000 },
+  { path: "/data/jobs/cap_0000beef/sheets/sheet_001.jpg", relativePath: "sheets/sheet_001.jpg", size: 2000 },
 ];
 
 function createMockStorage(): Storage {
@@ -87,13 +62,13 @@ function createMockStorage(): Storage {
     readFile: vi.fn().mockResolvedValue(Buffer.from("fake file data")),
     getFileStream: vi.fn().mockImplementation(() => createFakeStream()),
     getFileInfo: vi.fn().mockResolvedValue({
-      path: "/data/jobs/cap_test/frames/frame_0001.jpg",
+      path: "/data/jobs/cap_0000beef/frames/frame_0001.jpg",
       relativePath: "frames/frame_0001.jpg",
       size: 1000,
     } satisfies FileInfo),
     listFiles: vi.fn().mockResolvedValue([...sampleFrameFiles, ...sampleSheetFiles]),
     deleteJobDir: vi.fn().mockResolvedValue(undefined),
-    getJobDir: vi.fn().mockReturnValue("/data/jobs/cap_test"),
+    getJobDir: vi.fn().mockReturnValue("/data/jobs/cap_0000beef"),
   };
 }
 
@@ -114,8 +89,9 @@ describe("GET /api/v1/jobs/:id/download", () => {
       format: "mov",
     });
     mockExtractFrames.mockResolvedValue({
-      frameFiles: ["/data/jobs/cap_test/frames/frame_0001.jpg"],
+      frameFiles: ["/data/jobs/cap_0000beef/frames/frame_0001.jpg"],
       frameCount: 1,
+      frameTimes: [],
     });
   });
 
@@ -176,7 +152,7 @@ describe("GET /api/v1/jobs/:id/download", () => {
 
     const response = await app.inject({
       method: "GET",
-      url: "/api/v1/jobs/cap_nonexistent/download",
+      url: "/api/v1/jobs/cap_0000dea0/download",
     });
 
     expect(response.statusCode).toBe(404);

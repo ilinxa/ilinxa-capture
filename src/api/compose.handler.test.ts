@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { buildApp } from "../app.js";
-import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 import type { CompositionResult } from "../core/composer.js";
 
 // Mock core modules
@@ -29,38 +29,14 @@ const mockReaddir = vi.mocked(readdir);
 
 const sampleCompositionResult: CompositionResult = {
   sheetFiles: [
-    "/data/jobs/cap_test1234/sheets/sheet_001.jpg",
-    "/data/jobs/cap_test1234/sheets/sheet_002.jpg",
+    "/data/jobs/cap_0000abcd/sheets/sheet_001.jpg",
+    "/data/jobs/cap_0000abcd/sheets/sheet_002.jpg",
   ],
   sheetCount: 2,
+  sheets: [],
   mode: 4,
   grid: "2x2",
 };
-
-function createTestEnv(overrides?: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "0.0.0.0",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
-    UI_DIR: "./ui/dist",
-    ...overrides,
-  };
-}
 
 describe("POST /api/v1/compose", () => {
   beforeEach(() => {
@@ -81,10 +57,10 @@ describe("POST /api/v1/compose", () => {
       headers: { "content-type": "application/json" },
       payload: {
         frames: [
-          "/data/jobs/cap_abc/frames/frame_0001.jpg",
-          "/data/jobs/cap_abc/frames/frame_0002.jpg",
-          "/data/jobs/cap_abc/frames/frame_0003.jpg",
-          "/data/jobs/cap_abc/frames/frame_0004.jpg",
+          "/data/jobs/cap_0000abc0/frames/frame_0001.jpg",
+          "/data/jobs/cap_0000abc0/frames/frame_0002.jpg",
+          "/data/jobs/cap_0000abc0/frames/frame_0003.jpg",
+          "/data/jobs/cap_0000abc0/frames/frame_0004.jpg",
         ],
         mode: 4,
       },
@@ -125,13 +101,15 @@ describe("POST /api/v1/compose", () => {
     ] as unknown as Awaited<ReturnType<typeof readdir>>);
 
     const app = await buildApp({ env: createTestEnv(), logger: false });
+    const job = await app.jobManager.createJob("cap_0000e815", { type: "extract" });
+    job.status = "completed";
 
     const response = await app.inject({
       method: "POST",
       url: "/api/v1/compose",
       headers: { "content-type": "application/json" },
       payload: {
-        job_id: "cap_existing",
+        job_id: "cap_0000e815",
         mode: 4,
       },
     });
@@ -139,8 +117,64 @@ describe("POST /api/v1/compose", () => {
     expect(response.statusCode).toBe(200);
 
     const body = JSON.parse(response.body) as Record<string, unknown>;
-    expect(body["job_id"]).toBe("cap_existing");
+    expect(body["job_id"]).toBe("cap_0000e815");
     expect(body["status"]).toBe("completed");
+
+    await app.close();
+  });
+
+  it("returns 404 for a job_id that is not a real job", async () => {
+    const app = await buildApp({ env: createTestEnv(), logger: false });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/compose",
+      headers: { "content-type": "application/json" },
+      payload: { job_id: "cap_0000dea0", mode: 4 },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(mockComposeGrid).not.toHaveBeenCalled();
+
+    await app.close();
+  });
+
+  it.each(["../target", "..\\target", "cap_abc/../../x", "/etc", "C:\\Windows", "cap_ABCDEF12"])(
+    "returns 400 for job_id %s and touches nothing",
+    async (jobId) => {
+      const app = await buildApp({ env: createTestEnv(), logger: false });
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/compose",
+        headers: { "content-type": "application/json" },
+        payload: { job_id: jobId, mode: 4 },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(mockReaddir).not.toHaveBeenCalledWith(
+        expect.stringContaining("target"),
+      );
+      expect(mockComposeGrid).not.toHaveBeenCalled();
+
+      await app.close();
+    },
+  );
+
+  it("returns 409 while the job is still running", async () => {
+    const app = await buildApp({ env: createTestEnv(), logger: false });
+    const job = await app.jobManager.createJob("cap_0000e815", { type: "extract" });
+    job.status = "processing";
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/compose",
+      headers: { "content-type": "application/json" },
+      payload: { job_id: "cap_0000e815", mode: 4 },
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body).error.code).toBe("JOB_BUSY");
 
     await app.close();
   });
@@ -194,7 +228,7 @@ describe("POST /api/v1/compose", () => {
       url: "/api/v1/compose",
       headers: { "content-type": "application/json" },
       payload: {
-        job_id: "cap_abc",
+        job_id: "cap_0000abc0",
         frames: ["/data/frames/frame_0001.jpg"],
         mode: 4,
       },

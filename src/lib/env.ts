@@ -4,10 +4,14 @@ const envSchema = z
   .object({
     // Server
     PORT: z.coerce.number().int().positive().default(3000),
-    HOST: z.string().default("0.0.0.0"),
+    HOST: z.string().default("127.0.0.1"),
     NODE_ENV: z
       .enum(["development", "production", "test"])
       .default("development"),
+
+    // Network boundary — comma-separated; "*" disables the check
+    ALLOWED_HOSTS: z.string().default(""),
+    ALLOWED_ORIGINS: z.string().default(""),
 
     // Logging
     LOG_LEVEL: z
@@ -17,7 +21,7 @@ const envSchema = z
     // Storage
     STORAGE_MODE: z.enum(["local", "s3"]).default("local"),
     LOCAL_OUTPUT_DIR: z.string().default("./data/jobs"),
-    LOCAL_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+    LOCAL_TTL_SECONDS: z.coerce.number().int().positive().default(86400),
 
     // S3 (optional — validated conditionally via refine)
     S3_BUCKET: z.string().optional(),
@@ -30,11 +34,16 @@ const envSchema = z
     // UI
     UI_DIR: z.string().default("./ui/dist"),
 
-    // Processing limits
-    MAX_VIDEO_DURATION: z.coerce.number().int().positive().default(600),
+    // Local paths callers may read: path.delimiter-separated folders; "*" = any.
+    // Empty means output folder only over HTTP, and any path over stdio.
+    ALLOWED_INPUT_DIRS: z.string().default(""),
+
+    // Processing limits (0 = no limit for duration and timeout)
+    MAX_VIDEO_DURATION: z.coerce.number().int().nonnegative().default(600),
     MAX_UPLOAD_SIZE: z.coerce.number().int().positive().default(524288000),
     MAX_CONCURRENT_JOBS: z.coerce.number().int().positive().default(3),
-    JOB_TIMEOUT: z.coerce.number().int().positive().default(300),
+    JOB_TIMEOUT: z.coerce.number().int().nonnegative().default(300),
+    MAX_SHEET_EDGE: z.coerce.number().int().nonnegative().default(2000),
 
     // MCP
     MCP_SESSION_TTL: z.coerce.number().int().positive().default(1800),

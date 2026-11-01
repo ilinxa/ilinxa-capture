@@ -1,0 +1,367 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { JobManager, type JobContext } from "./job-manager.js";
+import { createTestEnv } from "../test/env.js";
+import type { Env } from "../lib/env.js";
+
+const logger = { info: vi.fn(), warn: vi.fn() };
+
+/** A task that runs until it is aborted, as a stuck FFmpeg would. */
+function hang(ctx: JobContext): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    ctx.signal.addEventListener("abort", () => reject(ctx.signal.reason));
+  });
+}
+
+async function waitFor(check: () => boolean, ms = 3000): Promise<void> {
+  const start = Date.now();
+  while (!check()) {
+    if (Date.now() - start > ms) throw new Error("condition not met in time");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
+describe("JobManager lifecycle", () => {
+  let dir: string;
+  let managers: JobManager[];
+
+  function createManager(overrides: Partial<Env> = {}): JobManager {
+    const manager = new JobManager(
+      createTestEnv({ LOCAL_OUTPUT_DIR: dir, ...overrides }),
+      logger,
+    );
+    managers.push(manager);
+    return manager;
+  }
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "ilinxa-jobs-"));
+    managers = [];
+    vi.clearAllMocks();
+  });
+
+  afterEach(async () => {
+    await Promise.all(managers.map((m) => m.shutdown()));
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  describe("timeout", () => {
+    it("fails a sync job with JOB_TIMEOUT and aborts its task", async () => {
+      const manager = createManager({ JOB_TIMEOUT: 1 });
+      const job = await manager.createJob("cap_00000001", { type: "extract" });
+
+      await expect(manager.runSync(job.id, hang)).rejects.toMatchObject({
+        code: "JOB_TIMEOUT",
+        statusCode: 504,
+      });
+
+      expect(job.status).toBe("failed");
+      expect(job.error_code).toBe("JOB_TIMEOUT");
+    });
+
+    // Regression: the queue's timeout rejected a promise nobody held, and the
+    // unhandled rejection ended the whole server process.
+    it("fails an async job without an unhandled rejection", async () => {
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+
+      const manager = createManager({ JOB_TIMEOUT: 1 });
+      const job = await manager.createJob("cap_00000002", { type: "extract" });
+      manager.runAsync(job.id, hang);
+
+      await waitFor(() => job.status === "failed");
+      await new Promise((r) => setTimeout(r, 20));
+      process.off("unhandledRejection", unhandled);
+
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(job.error_code).toBe("JOB_TIMEOUT");
+    });
+
+    // Regression: the queue freed the slot at the timeout while work continued.
+    it("holds the concurrency slot until the task has really stopped", async () => {
+      const manager = createManager({ JOB_TIMEOUT: 1, MAX_CONCURRENT_JOBS: 1 });
+      const first = await manager.createJob("cap_00000003", { type: "extract" });
+      const second = await manager.createJob("cap_00000004", { type: "extract" });
+
+      let finishCleanup: () => void = () => {};
+      const slowStop = async (ctx: JobContext): Promise<void> => {
+        await hang(ctx).catch(async (reason: unknown) => {
+          await new Promise<void>((done) => {
+            finishCleanup = done;
+          });
+          throw reason;
+        });
+      };
+
+      const running = manager.runSync(first.id, slowStop).catch(() => {});
+      let secondStarted = false;
+      const queued = manager.runSync(second.id, async () => {
+        secondStarted = true;
+      });
+
+      await waitFor(() => first.status === "processing");
+      await new Promise((r) => setTimeout(r, 1200)); // past the timeout
+      expect(secondStarted).toBe(false);
+
+      finishCleanup();
+      await Promise.all([running, queued]);
+      expect(secondStarted).toBe(true);
+    });
+
+    it("reports the abort reason even when core code wrapped the error", async () => {
+      const manager = createManager({ JOB_TIMEOUT: 1 });
+      const job = await manager.createJob("cap_00000005", { type: "extract" });
+
+      await expect(
+        manager.runSync(job.id, async (ctx) => {
+          await hang(ctx).catch(() => {
+            throw new Error("FFmpeg extraction failed: killed");
+          });
+        }),
+      ).rejects.toMatchObject({ code: "JOB_TIMEOUT" });
+    });
+
+    it("never times out when JOB_TIMEOUT is 0", async () => {
+      const manager = createManager({ JOB_TIMEOUT: 0 });
+      const job = await manager.createJob("cap_00000006", { type: "extract" });
+
+      await expect(
+        manager.runSync(job.id, async (ctx) => {
+          await new Promise((r) => setTimeout(r, 30));
+          return ctx.signal.aborted;
+        }),
+      ).resolves.toBe(false);
+    });
+  });
+
+  describe("delete", () => {
+    it("stops a running job and leaves no directory behind", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_00000007", { type: "extract" });
+      const run = manager.runSync(job.id, hang).catch((err: unknown) => err);
+      await waitFor(() => job.status === "processing");
+
+      await manager.deleteJob(job.id);
+
+      expect(await run).toMatchObject({ code: "JOB_CANCELLED" });
+      expect(() => manager.getJob(job.id)).toThrow();
+      await expect(access(join(dir, job.id))).rejects.toThrow();
+    });
+
+    it("does not start a job deleted while it was queued", async () => {
+      const manager = createManager({ MAX_CONCURRENT_JOBS: 1 });
+      const first = await manager.createJob("cap_00000008", { type: "extract" });
+      const queued = await manager.createJob("cap_00000009", { type: "extract" });
+
+      const running = manager.runSync(first.id, hang).catch(() => {});
+      await waitFor(() => first.status === "processing");
+
+      let started = false;
+      const pending = manager
+        .runSync(queued.id, async () => {
+          started = true;
+        })
+        .catch((err: unknown) => err);
+      await manager.deleteJob(queued.id);
+      await manager.deleteJob(first.id);
+
+      expect(await pending).toMatchObject({ code: "JOB_CANCELLED" });
+      await running;
+      expect(started).toBe(false);
+    });
+  });
+
+  it("does not start a task aborted before it began", async () => {
+    const manager = createManager();
+    const job = await manager.createJob("cap_00000015", { type: "extract" });
+
+    let started = false;
+    const run = manager
+      .runSync(job.id, async () => {
+        started = true;
+      })
+      .catch((err: unknown) => err);
+
+    // Status flips before the first write, so this lands in the gap.
+    await waitFor(() => job.status === "processing");
+    await manager.deleteJob(job.id);
+
+    expect(await run).toMatchObject({ code: "JOB_CANCELLED" });
+    expect(started).toBe(false);
+  });
+
+  describe("reopen", () => {
+    it("keeps the earlier result for the task to build on", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_0000000a", { type: "extract" });
+      await manager.runSync(job.id, async () => ({ frames: 3 }));
+
+      await manager.reopenJob(job.id, { type: "combined" });
+
+      expect(job.status).toBe("pending");
+      expect(job.type).toBe("combined");
+      expect(job.result).toEqual({ frames: 3 });
+      expect(job.completed_at).toBeNull();
+    });
+
+    it("refuses a job that is still running", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_0000000b", { type: "extract" });
+      const run = manager.runSync(job.id, hang).catch(() => {});
+      await waitFor(() => job.status === "processing");
+
+      await expect(
+        manager.reopenJob(job.id, { type: "combined" }),
+      ).rejects.toMatchObject({ code: "JOB_BUSY", statusCode: 409 });
+
+      await manager.deleteJob(job.id);
+      await run;
+    });
+
+    it("lets exactly one of two simultaneous callers through", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_0000000c", { type: "extract" });
+      await manager.runSync(job.id, async () => ({}));
+
+      const outcomes = await Promise.allSettled([
+        manager.reopenJob(job.id, { type: "combined" }),
+        manager.reopenJob(job.id, { type: "combined" }),
+      ]);
+
+      expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+    });
+  });
+
+  describe("forget", () => {
+    it("drops a finished job from the registry", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_0000000d", { type: "extract" });
+      await manager.runSync(job.id, async () => ({}));
+
+      manager.forgetJob(job.id);
+
+      expect(() => manager.getJob(job.id)).toThrow();
+    });
+
+    it("leaves a running job alone", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_0000000e", { type: "extract" });
+      const run = manager.runSync(job.id, hang).catch(() => {});
+      await waitFor(() => job.status === "processing");
+
+      manager.forgetJob(job.id);
+
+      expect(manager.getJob(job.id)).toBe(job);
+      await manager.deleteJob(job.id);
+      await run;
+    });
+  });
+
+  describe("job IDs", () => {
+    it.each(["../escape", "..\\escape", "/etc", "cap_123", "cap_ZZZZZZZZ", "cap_12345678/.."])(
+      "refuses to create %s",
+      async (id) => {
+        const manager = createManager();
+        await expect(manager.createJob(id, { type: "extract" })).rejects.toMatchObject({
+          code: "VALIDATION_ERROR",
+        });
+      },
+    );
+
+    it("refuses to resolve a directory for a bad ID", () => {
+      const manager = createManager();
+      expect(() => manager.getJobDir("../escape")).toThrow();
+    });
+  });
+
+  describe("recovery", () => {
+    async function plant(entry: string, id: string): Promise<void> {
+      await mkdir(join(dir, entry), { recursive: true });
+      await writeFile(
+        join(dir, entry, "job.json"),
+        JSON.stringify({
+          id,
+          type: "extract",
+          status: "completed",
+          created_at: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+    }
+
+    it("skips a job.json whose ID is not a real job ID", async () => {
+      await plant("cap_0000000f", "../../outside");
+      const manager = createManager();
+      await manager.recover();
+      expect(() => manager.getJob("../../outside")).toThrow();
+    });
+
+    it("skips a job.json whose ID does not match its folder", async () => {
+      await plant("cap_00000010", "cap_00000011");
+      const manager = createManager();
+      await manager.recover();
+      expect(() => manager.getJob("cap_00000011")).toThrow();
+    });
+
+    it("recovers a job written by an older build", async () => {
+      await plant("cap_00000012", "cap_00000012");
+      const manager = createManager();
+      await manager.recover();
+      expect(manager.getJob("cap_00000012").error_code).toBeNull();
+    });
+
+    it("marks an interrupted job failed", async () => {
+      await mkdir(join(dir, "cap_00000013"));
+      await writeFile(
+        join(dir, "cap_00000013", "job.json"),
+        JSON.stringify({
+          id: "cap_00000013",
+          type: "extract",
+          status: "processing",
+          created_at: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+
+      const manager = createManager();
+      await manager.recover();
+
+      const onDisk = JSON.parse(
+        await readFile(join(dir, "cap_00000013", "job.json"), "utf-8"),
+      ) as { status: string };
+      expect(onDisk.status).toBe("failed");
+    });
+  });
+
+  describe("shutdown", () => {
+    it("rejects queued sync callers instead of leaving them waiting", async () => {
+      const manager = createManager({ MAX_CONCURRENT_JOBS: 1, JOB_TIMEOUT: 0 });
+      const running = await manager.createJob("cap_00000016", { type: "extract" });
+      const queued = await manager.createJob("cap_00000017", { type: "extract" });
+
+      const first = manager.runSync(running.id, hang).catch((err: unknown) => err);
+      await waitFor(() => running.status === "processing");
+      await new Promise((r) => setTimeout(r, 20));
+      const second = manager
+        .runSync(queued.id, async () => "never")
+        .catch((err: unknown) => err);
+
+      await manager.shutdown();
+
+      expect(await first).toMatchObject({ code: "JOB_CANCELLED" });
+      expect(await second).toMatchObject({ code: "JOB_CANCELLED" });
+    });
+
+    it("stops running jobs rather than waiting for them", async () => {
+      const manager = createManager({ JOB_TIMEOUT: 0 });
+      const job = await manager.createJob("cap_00000014", { type: "extract" });
+      const run = manager.runSync(job.id, hang).catch((err: unknown) => err);
+      await waitFor(() => job.status === "processing");
+
+      await manager.shutdown();
+
+      expect(await run).toMatchObject({ code: "JOB_CANCELLED" });
+      expect(job.status).toBe("failed");
+    });
+  });
+});

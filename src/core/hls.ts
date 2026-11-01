@@ -30,6 +30,8 @@ export interface HlsDiscoverResult {
   streams: DiscoveredStream[];
 }
 
+const FETCH_TIMEOUT_MS = 30 * 1000;
+
 // ─── Helpers ────────────────────────────────────────────────────────
 
 function buildFetchHeaders(
@@ -107,10 +109,14 @@ export function isHlsUrl(source: string): boolean {
 export async function parseHlsMasterPlaylist(
   url: string,
   headers?: Record<string, string>,
+  signal: AbortSignal = AbortSignal.timeout(FETCH_TIMEOUT_MS),
 ): Promise<HlsPlaylistInfo> {
   let text: string;
   try {
-    const response = await fetch(url, { headers: buildFetchHeaders(headers) });
+    const response = await fetch(url, {
+      headers: buildFetchHeaders(headers),
+      signal,
+    });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`);
     }
@@ -189,11 +195,13 @@ export async function parseHlsMasterPlaylist(
 export async function discoverHlsUrls(
   pageUrl: string,
   headers?: Record<string, string>,
+  signal: AbortSignal = AbortSignal.timeout(FETCH_TIMEOUT_MS),
 ): Promise<HlsDiscoverResult> {
   let html: string;
   try {
     const response = await fetch(pageUrl, {
       headers: buildFetchHeaders(headers),
+      signal,
     });
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`);
@@ -253,6 +261,7 @@ export async function downloadHlsStream(
   url: string,
   outputPath: string,
   headers?: Record<string, string>,
+  signal?: AbortSignal,
 ): Promise<void> {
   const args: string[] = [];
 
@@ -278,8 +287,12 @@ export async function downloadHlsStream(
   );
 
   try {
-    await execFileAsync("ffmpeg", args, { maxBuffer: 50 * 1024 * 1024 });
+    await execFileAsync("ffmpeg", args, {
+      maxBuffer: 50 * 1024 * 1024,
+      signal,
+    });
   } catch (err) {
+    if (signal?.aborted) throw signal.reason;
     const message = err instanceof Error ? err.message : String(err);
     throw new HlsParseError(`FFmpeg HLS download failed: ${message}`);
   }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { buildApp } from "../app.js";
-import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 import type { ExtractionResult } from "../core/extractor.js";
 import type { VideoMetadata } from "../core/metadata.js";
 import type { CompositionResult } from "../core/composer.js";
@@ -59,47 +59,24 @@ const sampleMetadata: VideoMetadata = {
 
 const sampleExtractionResult: ExtractionResult = {
   frameFiles: [
-    "/data/jobs/cap_test1234/frames/frame_0001.jpg",
-    "/data/jobs/cap_test1234/frames/frame_0002.jpg",
-    "/data/jobs/cap_test1234/frames/frame_0003.jpg",
-    "/data/jobs/cap_test1234/frames/frame_0004.jpg",
+    "/data/jobs/cap_0000abcd/frames/frame_0001.jpg",
+    "/data/jobs/cap_0000abcd/frames/frame_0002.jpg",
+    "/data/jobs/cap_0000abcd/frames/frame_0003.jpg",
+    "/data/jobs/cap_0000abcd/frames/frame_0004.jpg",
   ],
   frameCount: 4,
+  frameTimes: [],
 };
 
 const sampleCompositionResult: CompositionResult = {
   sheetFiles: [
-    "/data/jobs/cap_test1234/sheets/sheet_001.jpg",
+    "/data/jobs/cap_0000abcd/sheets/sheet_001.jpg",
   ],
   sheetCount: 1,
+  sheets: [],
   mode: 4,
   grid: "2x2",
 };
-
-function createTestEnv(overrides?: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "0.0.0.0",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
-    UI_DIR: "./ui/dist",
-    ...overrides,
-  };
-}
 
 describe("POST /api/v1/extract-and-compose", () => {
   beforeEach(() => {

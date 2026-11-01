@@ -9,10 +9,27 @@ interface MinimalLogger {
   warn(obj: Record<string, unknown>, msg: string): void;
 }
 import type { Env } from "../lib/env.js";
-import { JobNotFoundError } from "../utils/errors.js";
+import {
+  JobBusyError,
+  JobCancelledError,
+  JobNotFoundError,
+  JobTimeoutError,
+} from "../utils/errors.js";
+import { assertValidJobId, JOB_ID_PATTERN } from "./job-id.js";
 
 export type JobStatus = "pending" | "processing" | "completed" | "failed";
-export type JobType = "extract" | "compose" | "combined" | "video_download";
+export type JobType =
+  | "extract"
+  | "compose"
+  | "combined"
+  | "video_download"
+  | "shots"
+  | "audio";
+
+export interface JobProgress {
+  stage: string;
+  percent: number | null;
+}
 
 export interface JobState {
   id: string;
@@ -23,9 +40,11 @@ export interface JobState {
   completed_at: string | null;
   failed_at: string | null;
   error: string | null;
+  error_code: string | null;
   webhook_url: string | null;
   result: unknown | null;
   processing_time_ms: number | null;
+  progress: JobProgress | null;
 }
 
 // Kept adjacent to JobState so the two can't drift out of sync.
@@ -34,14 +53,22 @@ export interface JobState {
 // transform normalizes them to the `| null` shape JobState requires.
 export const jobStateSchema = z
   .object({
-    id: z.string(),
-    type: z.enum(["extract", "compose", "combined", "video_download"]),
+    id: z.string().regex(JOB_ID_PATTERN),
+    type: z.enum([
+      "extract",
+      "compose",
+      "combined",
+      "video_download",
+      "shots",
+      "audio",
+    ]),
     status: z.enum(["pending", "processing", "completed", "failed"]),
     created_at: z.string(),
     started_at: z.string().nullish(),
     completed_at: z.string().nullish(),
     failed_at: z.string().nullish(),
     error: z.string().nullish(),
+    error_code: z.string().nullish(),
     webhook_url: z.string().nullish(),
     result: z.unknown().nullish(),
     processing_time_ms: z.number().nullish(),
@@ -56,9 +83,11 @@ export const jobStateSchema = z
       completed_at: j.completed_at ?? null,
       failed_at: j.failed_at ?? null,
       error: j.error ?? null,
+      error_code: j.error_code ?? null,
       webhook_url: j.webhook_url ?? null,
       result: j.result ?? null,
       processing_time_ms: j.processing_time_ms ?? null,
+      progress: null,
     }),
   );
 
@@ -67,7 +96,20 @@ export interface CreateJobOptions {
   webhookUrl?: string;
 }
 
-export type TaskFunction<T> = (jobId: string) => Promise<T>;
+/** What a running task gets from the manager. */
+export interface JobContext {
+  jobId: string;
+  /** Aborted on timeout, cancel and shutdown. Pass it to every child process. */
+  signal: AbortSignal;
+  reportProgress: (progress: JobProgress) => void;
+}
+
+export type TaskFunction<T> = (ctx: JobContext) => Promise<T>;
+
+interface ActiveJob {
+  controller: AbortController;
+  settled: Promise<void>;
+}
 
 interface WebhookPayload {
   event: "job.completed" | "job.failed";
@@ -81,17 +123,18 @@ interface WebhookPayload {
 
 export class JobManager {
   private readonly jobs: Map<string, JobState> = new Map();
+  private readonly active: Map<string, ActiveJob> = new Map();
   private readonly queue: PQueue;
   private readonly outputDir: string;
   private readonly logger: MinimalLogger;
+  private readonly timeoutSeconds: number;
+  private closing = false;
 
   constructor(env: Env, logger: MinimalLogger) {
     this.outputDir = resolve(env.LOCAL_OUTPUT_DIR);
     this.logger = logger;
-    this.queue = new PQueue({
-      concurrency: env.MAX_CONCURRENT_JOBS,
-      timeout: env.JOB_TIMEOUT * 1000,
-    });
+    this.timeoutSeconds = env.JOB_TIMEOUT;
+    this.queue = new PQueue({ concurrency: env.MAX_CONCURRENT_JOBS });
   }
 
   generateJobId(): string {
@@ -99,10 +142,12 @@ export class JobManager {
   }
 
   getJobDir(jobId: string): string {
+    assertValidJobId(jobId);
     return resolve(this.outputDir, jobId);
   }
 
   async createJob(jobId: string, opts: CreateJobOptions): Promise<JobState> {
+    assertValidJobId(jobId);
     const job: JobState = {
       id: jobId,
       type: opts.type,
@@ -112,12 +157,40 @@ export class JobManager {
       completed_at: null,
       failed_at: null,
       error: null,
+      error_code: null,
       webhook_url: opts.webhookUrl ?? null,
       result: null,
       processing_time_ms: null,
+      progress: null,
     };
 
     this.jobs.set(jobId, job);
+    await this.persistJob(job);
+    return job;
+  }
+
+  /**
+   * Put a finished job back in the queue for more work on the same output, as
+   * composing sheets from extracted frames does. `result` is kept for the task
+   * to build on. The status check and change are one synchronous step, so two
+   * concurrent callers can never both win.
+   */
+  async reopenJob(jobId: string, opts: CreateJobOptions): Promise<JobState> {
+    const job = this.getJob(jobId);
+    if (job.status === "pending" || job.status === "processing") {
+      throw new JobBusyError(jobId);
+    }
+
+    job.type = opts.type;
+    job.status = "pending";
+    job.webhook_url = opts.webhookUrl ?? job.webhook_url;
+    job.started_at = null;
+    job.completed_at = null;
+    job.failed_at = null;
+    job.error = null;
+    job.error_code = null;
+    job.progress = null;
+
     await this.persistJob(job);
     return job;
   }
@@ -130,74 +203,122 @@ export class JobManager {
     return job;
   }
 
+  /** Stop a job if it is running, then remove it and everything it wrote. */
   async deleteJob(jobId: string): Promise<void> {
-    const job = this.jobs.get(jobId);
-    if (!job) {
+    if (!this.jobs.has(jobId)) {
       throw new JobNotFoundError(jobId);
     }
 
+    const active = this.active.get(jobId);
+    if (active) {
+      active.controller.abort(new JobCancelledError(jobId));
+      await active.settled;
+    }
+
     this.jobs.delete(jobId);
-    const jobDir = this.getJobDir(jobId);
-    await rm(jobDir, { recursive: true, force: true });
+    await rm(this.getJobDir(jobId), { recursive: true, force: true });
+  }
+
+  /** Drop a job whose directory is already gone, as after a cleanup sweep. */
+  forgetJob(jobId: string): void {
+    if (!this.active.has(jobId)) {
+      this.jobs.delete(jobId);
+    }
   }
 
   async runSync<T>(jobId: string, task: TaskFunction<T>): Promise<T> {
-    const job = this.getJob(jobId);
-
-    const result = await this.queue.add(async () => {
-      job.status = "processing";
-      job.started_at = new Date().toISOString();
-      await this.persistJob(job);
-
-      const startTime = Date.now();
-      try {
-        const taskResult = await task(jobId);
-        job.status = "completed";
-        job.completed_at = new Date().toISOString();
-        job.result = taskResult;
-        job.processing_time_ms = Date.now() - startTime;
-        await this.persistJob(job);
-        return taskResult;
-      } catch (err) {
-        job.status = "failed";
-        job.failed_at = new Date().toISOString();
-        job.error = err instanceof Error ? err.message : String(err);
-        job.processing_time_ms = Date.now() - startTime;
-        await this.persistJob(job);
-        throw err;
-      }
-    });
-
+    this.getJob(jobId);
+    const result = await this.queue.add(() => this.execute(jobId, task));
     return result as T;
   }
 
   runAsync(jobId: string, task: TaskFunction<unknown>): void {
-    void this.queue.add(async () => {
-      const job = this.jobs.get(jobId);
-      if (!job) return; // Job was deleted while queued
+    this.queue
+      .add(async () => {
+        try {
+          await this.execute(jobId, task);
+        } catch {
+          // Already recorded on the job. Nothing is waiting for this promise.
+        }
 
+        const job = this.jobs.get(jobId);
+        if (job && !this.closing) await this.fireWebhook(job);
+      })
+      .catch((err: unknown) => {
+        // A rejection here would be unhandled, and that ends the process.
+        this.logger.warn({ jobId, err }, "Async job failed to settle");
+      });
+  }
+
+  /**
+   * Run one task inside its queue slot. The slot is held until the task has
+   * settled, which `execFileAsync` only does once its process is gone, so
+   * MAX_CONCURRENT_JOBS stays true after a timeout.
+   */
+  private async execute<T>(jobId: string, task: TaskFunction<T>): Promise<T> {
+    const job = this.jobs.get(jobId);
+    if (!job || this.closing) {
+      throw new JobCancelledError(jobId); // Deleted or shut down while queued
+    }
+
+    const controller = new AbortController();
+    let markSettled: () => void = () => {};
+    const settled = new Promise<void>((done) => {
+      markSettled = done;
+    });
+    this.active.set(jobId, { controller, settled });
+
+    const timer =
+      this.timeoutSeconds > 0
+        ? setTimeout(
+            () => controller.abort(new JobTimeoutError(String(this.timeoutSeconds))),
+            this.timeoutSeconds * 1000,
+          )
+        : null;
+
+    const startTime = Date.now();
+    try {
       job.status = "processing";
       job.started_at = new Date().toISOString();
       await this.persistJob(job);
 
-      const startTime = Date.now();
-      try {
-        const taskResult = await task(jobId);
-        job.status = "completed";
-        job.completed_at = new Date().toISOString();
-        job.result = taskResult;
-        job.processing_time_ms = Date.now() - startTime;
-        await this.persistJob(job);
-      } catch (err) {
-        job.status = "failed";
-        job.failed_at = new Date().toISOString();
-        job.error = err instanceof Error ? err.message : String(err);
-        job.processing_time_ms = Date.now() - startTime;
-        await this.persistJob(job);
-      }
+      // An abort during that write fired before the task could be listening.
+      controller.signal.throwIfAborted();
 
-      await this.fireWebhook(job);
-    });
+      const taskResult = await task({
+        jobId,
+        signal: controller.signal,
+        reportProgress: (progress) => {
+          job.progress = progress;
+        },
+      });
+
+      job.status = "completed";
+      job.completed_at = new Date().toISOString();
+      job.result = taskResult;
+      job.processing_time_ms = Date.now() - startTime;
+      job.progress = null;
+      await this.persistIfTracked(job);
+      return taskResult;
+    } catch (err) {
+      // Core modules wrap process errors; the abort reason is the real cause.
+      const failure: unknown = controller.signal.aborted
+        ? controller.signal.reason
+        : err;
+
+      job.status = "failed";
+      job.failed_at = new Date().toISOString();
+      job.error = failure instanceof Error ? failure.message : String(failure);
+      job.error_code = errorCode(failure);
+      job.processing_time_ms = Date.now() - startTime;
+      job.progress = null;
+      await this.persistIfTracked(job);
+      throw failure;
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.active.delete(jobId);
+      markSettled();
+    }
   }
 
   async recover(): Promise<void> {
@@ -222,7 +343,7 @@ export class JobManager {
         const content = await readFile(jobJsonPath, "utf-8");
         const parsed: unknown = JSON.parse(content);
         const result = jobStateSchema.safeParse(parsed);
-        if (!result.success) {
+        if (!result.success || result.data.id !== entry) {
           this.logger.warn(
             { jobJsonPath },
             "Skipping invalid job.json during recovery",
@@ -251,10 +372,24 @@ export class JobManager {
     );
   }
 
+  /**
+   * Stop running jobs, so no process outlives the server. Queued jobs drain
+   * through execute() and reject: clearing the queue instead would leave their
+   * callers waiting forever. Recovery marks them failed on the next start.
+   */
   async shutdown(): Promise<void> {
-    this.queue.clear();
+    this.closing = true;
+    for (const [jobId, active] of this.active) {
+      active.controller.abort(new JobCancelledError(jobId));
+    }
     await this.queue.onIdle();
     this.logger.info("Job manager shut down");
+  }
+
+  private async persistIfTracked(job: JobState): Promise<void> {
+    if (this.jobs.has(job.id)) {
+      await this.persistJob(job);
+    }
   }
 
   private async persistJob(job: JobState): Promise<void> {
@@ -293,4 +428,12 @@ export class JobManager {
       );
     }
   }
+}
+
+function errorCode(err: unknown): string | null {
+  if (typeof err === "object" && err !== null && "code" in err) {
+    const { code } = err as { code: unknown };
+    return typeof code === "string" ? code : null;
+  }
+  return null;
 }

@@ -19,6 +19,7 @@ async function main(): Promise<void> {
     outputDir: env.LOCAL_OUTPUT_DIR,
     ttlSeconds: env.LOCAL_TTL_SECONDS,
     logger: app.log,
+    onJobRemoved: (jobId) => app.jobManager.forgetJob(jobId),
   });
   cleanupScheduler.start();
 

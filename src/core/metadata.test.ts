@@ -1,14 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { getVideoMetadata, parseFps } from "./metadata.js";
 
-// Mock child_process.execFile
-vi.mock("node:child_process", () => ({
-  execFile: vi.fn(),
+// Mock the process runner
+vi.mock("../utils/exec.js", () => ({
+  execFileAsync: vi.fn(),
 }));
 
-import { execFile } from "node:child_process";
+import { execFileAsync } from "../utils/exec.js";
 
-const mockExecFile = vi.mocked(execFile);
+const mockExec = vi.mocked(execFileAsync);
 
 function createFfprobeOutput(overrides?: {
   streams?: Record<string, unknown>[];
@@ -63,10 +63,7 @@ describe("getVideoMetadata", () => {
   it("parses valid ffprobe output", async () => {
     const stdout = createFfprobeOutput();
 
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(null, stdout, "");
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: stdout, stderr: "" });
 
     const metadata = await getVideoMetadata("/path/to/video.mp4");
 
@@ -90,10 +87,7 @@ describe("getVideoMetadata", () => {
       },
     });
 
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(null, stdout, "");
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: stdout, stderr: "" });
 
     const metadata = await getVideoMetadata("/path/to/video.mkv");
     expect(metadata.format).toBe("matroska");
@@ -104,10 +98,7 @@ describe("getVideoMetadata", () => {
       streams: [{ codec_type: "audio", codec_name: "aac" }],
     });
 
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(null, stdout, "");
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: stdout, stderr: "" });
 
     await expect(getVideoMetadata("/path/to/audio.mp3")).rejects.toThrow(
       "No video stream found",
@@ -115,14 +106,7 @@ describe("getVideoMetadata", () => {
   });
 
   it("throws ProcessingError when ffprobe fails", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: Error, stdout: string, stderr: string) => void)(
-        new Error("ffprobe: No such file"),
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockRejectedValue(new Error("ffprobe: No such file"));
 
     await expect(getVideoMetadata("/nonexistent/file.mp4")).rejects.toThrow(
       "ffprobe failed",
@@ -130,10 +114,7 @@ describe("getVideoMetadata", () => {
   });
 
   it("throws ProcessingError for invalid JSON output", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(null, "not json", "");
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "not json", stderr: "" });
 
     await expect(getVideoMetadata("/path/to/video.mp4")).rejects.toThrow(
       "ffprobe returned invalid JSON",
@@ -143,17 +124,14 @@ describe("getVideoMetadata", () => {
   it("calls ffprobe with correct arguments", async () => {
     const stdout = createFfprobeOutput();
 
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(null, stdout, "");
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: stdout, stderr: "" });
 
     await getVideoMetadata("/test/file.mp4");
 
-    expect(mockExecFile).toHaveBeenCalledWith(
+    expect(mockExec).toHaveBeenCalledWith(
       "ffprobe",
       ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "/test/file.mp4"],
-      expect.any(Function),
+      expect.anything(),
     );
   });
 });

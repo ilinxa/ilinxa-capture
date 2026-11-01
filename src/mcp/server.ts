@@ -25,10 +25,7 @@ export function createMcpServer(deps: ToolDeps): McpServer {
   return server;
 }
 
-export interface McpPluginOptions {
-  env: ToolDeps["env"];
-  jobManager: ToolDeps["jobManager"];
-}
+export type McpPluginOptions = ToolDeps;
 
 export async function mcpHttpPlugin(
   app: FastifyInstance,

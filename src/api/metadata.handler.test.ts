@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { buildApp } from "../app.js";
-import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 import type { VideoMetadata } from "../core/metadata.js";
 
 // Mock the core metadata module to avoid needing real ffprobe
@@ -45,31 +45,6 @@ const sampleMetadata: VideoMetadata = {
   format: "mov",
 };
 
-function createTestEnv(overrides?: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "0.0.0.0",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
-    UI_DIR: "./ui/dist",
-    ...overrides,
-  };
-}
-
 describe("POST /api/v1/metadata", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -91,8 +66,14 @@ describe("POST /api/v1/metadata", () => {
 
     const body = JSON.parse(response.body) as VideoMetadata;
     expect(body).toEqual(sampleMetadata);
-    expect(mockDownloadVideo).toHaveBeenCalledWith("https://example.com/video.mp4");
-    expect(mockGetVideoMetadata).toHaveBeenCalledWith("/tmp/ilinxa-capture-dl-mock.mp4");
+    expect(mockDownloadVideo).toHaveBeenCalledWith(
+      "https://example.com/video.mp4",
+      expect.anything(),
+    );
+    expect(mockGetVideoMetadata).toHaveBeenCalledWith(
+      "/tmp/ilinxa-capture-dl-mock.mp4",
+      expect.anything(),
+    );
 
     await app.close();
   });

@@ -52,19 +52,27 @@ export function parseFps(rFrameRate: string | undefined): number {
  * Extract video metadata using ffprobe.
  * Accepts a local file path or a direct HTTP/HTTPS URL.
  */
-export async function getVideoMetadata(source: string): Promise<VideoMetadata> {
+export async function getVideoMetadata(
+  source: string,
+  opts: { signal?: AbortSignal | undefined } = {},
+): Promise<VideoMetadata> {
   let stdout: string;
 
   try {
-    const result = await execFileAsync("ffprobe", [
-      "-v", "error",
-      "-print_format", "json",
-      "-show_format",
-      "-show_streams",
-      source,
-    ]);
+    const result = await execFileAsync(
+      "ffprobe",
+      [
+        "-v", "error",
+        "-print_format", "json",
+        "-show_format",
+        "-show_streams",
+        source,
+      ],
+      { signal: opts.signal },
+    );
     stdout = result.stdout;
   } catch (err) {
+    if (opts.signal?.aborted) throw opts.signal.reason;
     const message = err instanceof Error ? err.message : String(err);
     throw new ProcessingError(`ffprobe failed: ${message}`);
   }

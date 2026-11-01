@@ -2,6 +2,8 @@ import { createReadStream, type ReadStream } from "node:fs";
 import { access, readFile, stat, readdir, rm } from "node:fs/promises";
 import { join, resolve, normalize, sep } from "node:path";
 import { ValidationError } from "../utils/errors.js";
+import { assertValidJobId } from "./job-id.js";
+import { compareNatural } from "./natural-sort.js";
 
 export interface FileInfo {
   path: string;
@@ -27,6 +29,7 @@ export class LocalStorage implements Storage {
   }
 
   getJobDir(jobId: string): string {
+    assertValidJobId(jobId);
     return join(this.baseDir, jobId);
   }
 
@@ -98,7 +101,7 @@ export class LocalStorage implements Storage {
         throw err;
       }
 
-      for (const entry of entries) {
+      for (const entry of [...entries].sort(compareNatural)) {
         const filePath = join(dirPath, entry);
         const fileStat = await stat(filePath);
         if (fileStat.isFile()) {

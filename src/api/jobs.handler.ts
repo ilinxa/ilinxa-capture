@@ -25,6 +25,7 @@ export function createGetJobHandler(jobManager: JobManager) {
             job_id: job.id,
             status: "failed",
             error: job.error,
+            error_code: job.error_code,
             failed_at: job.failed_at,
           }),
         );
@@ -38,7 +39,7 @@ export function createGetJobHandler(jobManager: JobManager) {
         JSON.stringify({
           job_id: job.id,
           status: job.status,
-          progress: null,
+          progress: job.progress,
           started_at: job.started_at,
         }),
       );

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { resolve } from "node:path";
 import Fastify from "fastify";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createMcpServer, mcpHttpPlugin } from "./server.js";
-import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 import type { JobManager, JobState, TaskFunction } from "../core/job-manager.js";
 
 // ─── Mock core modules ───────────────────────────────────────────────
@@ -47,7 +48,7 @@ vi.mock("../core/downloader.js", () => ({
     ],
   }),
   downloadVideoWithFormat: vi.fn().mockResolvedValue({
-    filePath: "/data/jobs/cap_test1234/video/Test Video.mp4",
+    filePath: "/data/jobs/cap_0000abcd/video/Test Video.mp4",
     filename: "Test Video.mp4",
     filesize: 12345678,
     ext: "mp4",
@@ -83,6 +84,8 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       "frame_0003.jpg",
     ]),
     unlink: vi.fn().mockResolvedValue(undefined),
+    writeFile: vi.fn().mockResolvedValue(undefined),
+    rm: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -109,40 +112,15 @@ const mockUnlink = vi.mocked(unlink);
 
 // ─── Test Helpers ────────────────────────────────────────────────────
 
-function createTestEnv(overrides?: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "0.0.0.0",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
-    UI_DIR: "./ui/dist",
-    ...overrides,
-  };
-}
-
 function createMockJobManager(): JobManager {
   return {
-    generateJobId: vi.fn().mockReturnValue("cap_test1234"),
+    generateJobId: vi.fn().mockReturnValue("cap_0000abcd"),
     createJob: vi.fn().mockResolvedValue({
-      id: "cap_test1234",
+      id: "cap_0000abcd",
       status: "pending",
     } as JobState),
     getJob: vi.fn().mockReturnValue({
-      id: "cap_test1234",
+      id: "cap_0000abcd",
       type: "extract",
       status: "completed",
       created_at: "2026-03-20T00:00:00.000Z",
@@ -155,13 +133,19 @@ function createMockJobManager(): JobManager {
       processing_time_ms: 4000,
     } as JobState),
     runSync: vi.fn().mockImplementation(
-      async <T>(_jobId: string, task: TaskFunction<T>) => task(_jobId),
+      async <T>(jobId: string, task: TaskFunction<T>) =>
+        task({
+          jobId,
+          signal: new AbortController().signal,
+          reportProgress: vi.fn(),
+        }),
     ),
     runAsync: vi.fn(),
     deleteJob: vi.fn(),
     recover: vi.fn().mockResolvedValue(undefined),
     shutdown: vi.fn().mockResolvedValue(undefined),
-    getJobDir: vi.fn().mockReturnValue("/data/jobs/cap_test1234"),
+    getJobDir: vi.fn().mockReturnValue("/data/jobs/cap_0000abcd"),
+    reopenJob: vi.fn().mockResolvedValue(undefined),
   } as unknown as JobManager;
 }
 
@@ -191,14 +175,16 @@ describe("MCP Server", () => {
     mockGetVideoMetadata.mockResolvedValue(sampleMetadata);
     mockExtractFrames.mockResolvedValue({
       frameFiles: [
-        "/data/jobs/cap_test1234/frames/frame_0001.jpg",
-        "/data/jobs/cap_test1234/frames/frame_0002.jpg",
+        "/data/jobs/cap_0000abcd/frames/frame_0001.jpg",
+        "/data/jobs/cap_0000abcd/frames/frame_0002.jpg",
       ],
       frameCount: 2,
+      frameTimes: [],
     });
     mockComposeGrid.mockResolvedValue({
-      sheetFiles: ["/data/jobs/cap_test1234/sheets/sheet_001.jpg"],
+      sheetFiles: ["/data/jobs/cap_0000abcd/sheets/sheet_001.jpg"],
       sheetCount: 1,
+      sheets: [],
       mode: 4,
       grid: "2x2",
     });
@@ -222,15 +208,16 @@ describe("MCP Server", () => {
   // ─── Server Setup ────────────────────────────────────────────────
 
   describe("server setup", () => {
-    it("lists all 8 tools", async () => {
+    it("lists every tool", async () => {
       const result = await client.listTools();
-      expect(result.tools).toHaveLength(8);
       const names = result.tools.map((t) => t.name).sort();
       expect(names).toEqual([
         "capture_compose",
         "capture_extract",
         "capture_extract_and_compose",
         "capture_hls_discover",
+        "capture_job_delete",
+        "capture_job_manifest",
         "capture_job_status",
         "capture_metadata",
         "capture_video_download",
@@ -312,7 +299,7 @@ describe("MCP Server", () => {
         job_id: string;
         frames: { count: number; files: string[] };
       };
-      expect(parsed.job_id).toBe("cap_test1234");
+      expect(parsed.job_id).toBe("cap_0000abcd");
       expect(parsed.frames.count).toBe(2);
       expect(parsed.frames.files).toHaveLength(2);
     });
@@ -326,6 +313,7 @@ describe("MCP Server", () => {
       expect(result.isError).toBeFalsy();
       expect(mockDownloadVideo).toHaveBeenCalledWith(
         "https://example.com/video.mp4",
+        expect.anything(),
       );
       // Verify extraction used the downloaded temp path
       expect(mockExtractFrames).toHaveBeenCalledWith(
@@ -380,7 +368,7 @@ describe("MCP Server", () => {
     it("composes with job_id — reads frames from directory", async () => {
       const result = await client.callTool({
         name: "capture_compose",
-        arguments: { job_id: "cap_existing", mode: 4 },
+        arguments: { job_id: "cap_0000e815", mode: 4 },
       });
 
       expect(result.isError).toBeFalsy();
@@ -412,7 +400,7 @@ describe("MCP Server", () => {
       expect(mockReaddir).not.toHaveBeenCalled();
       expect(mockComposeGrid).toHaveBeenCalledWith(
         expect.objectContaining({
-          frameFiles: frames,
+          frameFiles: frames.map((frame) => resolve(frame)),
         }),
       );
     });
@@ -421,7 +409,7 @@ describe("MCP Server", () => {
       const result = await client.callTool({
         name: "capture_compose",
         arguments: {
-          job_id: "cap_test",
+          job_id: "cap_0000beef",
           frames: ["/path/frame1.jpg"],
           mode: 4,
         },
@@ -475,7 +463,7 @@ describe("MCP Server", () => {
         frames: { count: number; files: string[] };
         sheets: { count: number; files: string[] };
       };
-      expect(parsed.job_id).toBe("cap_test1234");
+      expect(parsed.job_id).toBe("cap_0000abcd");
       expect(parsed.frames.count).toBe(2);
       expect(parsed.sheets.count).toBe(1);
     });
@@ -492,6 +480,7 @@ describe("MCP Server", () => {
 
       expect(mockDownloadVideo).toHaveBeenCalledWith(
         "https://example.com/video.mp4",
+        expect.anything(),
       );
       expect(mockExtractFrames).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -536,24 +525,24 @@ describe("MCP Server", () => {
     it("returns full job state for existing job", async () => {
       const result = await client.callTool({
         name: "capture_job_status",
-        arguments: { job_id: "cap_test1234" },
+        arguments: { job_id: "cap_0000abcd" },
       });
 
       expect(result.isError).toBeFalsy();
       const content = result.content as Array<{ type: string; text: string }>;
       const parsed = JSON.parse(content[0]!.text) as JobState;
-      expect(parsed.id).toBe("cap_test1234");
+      expect(parsed.id).toBe("cap_0000abcd");
       expect(parsed.status).toBe("completed");
     });
 
     it("returns isError for non-existent job", async () => {
       vi.mocked(mockJobManager.getJob).mockImplementation(() => {
-        throw new Error("Job 'cap_nonexistent' not found");
+        throw new Error("Job 'cap_0000dea0' not found");
       });
 
       const result = await client.callTool({
         name: "capture_job_status",
-        arguments: { job_id: "cap_nonexistent" },
+        arguments: { job_id: "cap_0000dea0" },
       });
 
       expect(result.isError).toBe(true);
@@ -564,7 +553,7 @@ describe("MCP Server", () => {
     it("returns all job fields", async () => {
       const result = await client.callTool({
         name: "capture_job_status",
-        arguments: { job_id: "cap_test1234" },
+        arguments: { job_id: "cap_0000abcd" },
       });
 
       const content = result.content as Array<{ type: string; text: string }>;
@@ -634,11 +623,11 @@ describe("MCP Server", () => {
         job_id: string;
         video: { filename: string; filesize: number; ext: string; file_path: string };
       };
-      expect(parsed.job_id).toBe("cap_test1234");
+      expect(parsed.job_id).toBe("cap_0000abcd");
       expect(parsed.video.filename).toBe("Test Video.mp4");
       expect(parsed.video.filesize).toBe(12345678);
       expect(parsed.video.ext).toBe("mp4");
-      expect(parsed.video.file_path).toContain("cap_test1234");
+      expect(parsed.video.file_path).toContain("cap_0000abcd");
     });
 
     it("returns isError when both preset and format_selector provided", async () => {

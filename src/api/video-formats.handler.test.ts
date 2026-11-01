@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { buildApp } from "../app.js";
-import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 
 // Mock core modules — this test only exercises validation, not the real
 // yt-dlp integration.
@@ -45,31 +45,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 import { listVideoFormats } from "../core/downloader.js";
 
 const mockListVideoFormats = vi.mocked(listVideoFormats);
-
-function createTestEnv(overrides?: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "0.0.0.0",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
-    UI_DIR: "./ui/dist",
-    ...overrides,
-  };
-}
 
 describe("POST /api/v1/video/formats", () => {
   beforeEach(() => {

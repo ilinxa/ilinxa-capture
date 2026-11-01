@@ -8,8 +8,8 @@ import type { ResolvedPreset } from "./presets.js";
 import { qualityToQscale } from "./presets.js";
 
 // Mock child_process and fs
-vi.mock("node:child_process", () => ({
-  execFile: vi.fn(),
+vi.mock("../utils/exec.js", () => ({
+  execFileAsync: vi.fn(),
 }));
 
 vi.mock("node:fs/promises", () => ({
@@ -17,10 +17,10 @@ vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
 }));
 
-import { execFile } from "node:child_process";
+import { execFileAsync } from "../utils/exec.js";
 import { mkdir, readdir } from "node:fs/promises";
 
-const mockExecFile = vi.mocked(execFile);
+const mockExec = vi.mocked(execFileAsync);
 const mockReaddir = vi.mocked(readdir);
 
 describe("qualityToQscale", () => {
@@ -44,14 +44,24 @@ describe("qualityToQscale", () => {
 });
 
 describe("buildVideoFilter", () => {
-  it("builds fps-only filter when no width", () => {
+  it("selects by interval and prints each frame's time, without the fps filter", () => {
     const preset: ResolvedPreset = { width: null, format: "png", quality: null };
-    expect(buildVideoFilter(5, preset)).toBe("fps=5");
+    const filter = buildVideoFilter(5, preset);
+    expect(filter).toContain("select='isnan(prev_selected_t)");
+    expect(filter).toContain("floor(t*5+");
+    expect(filter).toContain("metadata=mode=print:file=-");
+    expect(filter).not.toMatch(/(^|,)fps=/);
+    expect(filter).not.toContain("scale=");
   });
 
   it("adds scale when width is set", () => {
     const preset: ResolvedPreset = { width: 1024, format: "jpeg", quality: 80 };
-    expect(buildVideoFilter(10, preset)).toBe("fps=10,scale=1024:-2");
+    expect(buildVideoFilter(10, preset)).toMatch(/,scale=1024:-2$/);
+  });
+
+  it("accepts a fractional rate", () => {
+    const preset: ResolvedPreset = { width: null, format: "png", quality: null };
+    expect(buildVideoFilter(0.2, preset)).toContain("floor(t*0.2+");
   });
 });
 
@@ -67,7 +77,7 @@ describe("buildFfmpegArgs", () => {
     expect(args).toContain("-i");
     expect(args).toContain("/tmp/video.mp4");
     expect(args).toContain("-vf");
-    expect(args).toContain("fps=5,scale=1024:-2");
+    expect(args.join(" ")).toContain("scale=1024:-2");
     expect(args).toContain("-q:v");
     expect(args).toContain(String(qualityToQscale(80)));
     // Output pattern should be jpg
@@ -83,7 +93,7 @@ describe("buildFfmpegArgs", () => {
       preset: { width: null, format: "png", quality: null },
     });
 
-    expect(args).toContain("fps=10");
+    expect(args.join(" ")).toContain("floor(t*10+");
     expect(args).not.toContain("-q:v");
     const outputArg = args[args.length - 1];
     expect(outputArg).toMatch(/frame_%04d\.png$/);
@@ -97,7 +107,7 @@ describe("buildFfmpegArgs", () => {
       preset: { width: 720, format: "jpeg", quality: 60 },
     });
 
-    expect(args).toContain("fps=2,scale=720:-2");
+    expect(args.join(" ")).toContain("scale=720:-2");
     expect(args).toContain("-q:v");
     expect(args).toContain(String(qualityToQscale(60)));
   });
@@ -109,12 +119,7 @@ describe("extractFrames", () => {
   });
 
   it("creates output dir and returns frame list", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null, "", "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
 
     mockReaddir.mockResolvedValue([
       "frame_0001.jpg",
@@ -136,14 +141,7 @@ describe("extractFrames", () => {
   });
 
   it("throws ProcessingError on FFmpeg failure", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: Error, stdout: string, stderr: string) => void)(
-        new Error("FFmpeg crashed"),
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockRejectedValue(new Error("FFmpeg crashed"));
 
     await expect(
       extractFrames({
@@ -155,13 +153,84 @@ describe("extractFrames", () => {
     ).rejects.toThrow("FFmpeg extraction failed");
   });
 
-  it("filters and sorts frame files", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null, "", "",
-      );
-      return undefined as never;
+  it("orders frames numerically past 9,999", async () => {
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+
+    mockReaddir.mockResolvedValue([
+      "frame_10000.jpg",
+      "frame_9999.jpg",
+      "frame_1000.jpg",
+    ] as unknown as Awaited<ReturnType<typeof readdir>>);
+
+    const result = await extractFrames({
+      videoPath: "/tmp/video.mp4",
+      outputDir: "/output/frames",
+      fps: 30,
+      preset: { width: 1024, format: "jpeg", quality: 80 },
     });
+
+    expect(result.frameFiles.map((f) => f.split(/[\\/]/).pop())).toEqual([
+      "frame_1000.jpg",
+      "frame_9999.jpg",
+      "frame_10000.jpg",
+    ]);
+  });
+
+  it("reports each frame's printed time, offset by the range start", async () => {
+    mockExec.mockImplementation(async (_cmd, _args, opts) => {
+      opts?.onStdoutLine?.("frame:0    pts:0       pts_time:0.04");
+      opts?.onStdoutLine?.("capture=1");
+      opts?.onStdoutLine?.("frame:1    pts:25      pts_time:1.04");
+      return { stdout: "", stderr: "" };
+    });
+
+    mockReaddir.mockResolvedValue([
+      "frame_0001.jpg",
+      "frame_0002.jpg",
+    ] as unknown as Awaited<ReturnType<typeof readdir>>);
+
+    const result = await extractFrames({
+      videoPath: "/tmp/video.mp4",
+      outputDir: "/output/frames",
+      fps: 1,
+      preset: { width: 1024, format: "jpeg", quality: 80 },
+      range: { start: 100, end: 110 },
+    });
+
+    expect(result.frameTimes).toEqual([100.04, 101.04]);
+  });
+
+  it("seeks before the input for a range", () => {
+    const args = buildFfmpegArgs({
+      videoPath: "/tmp/video.mp4",
+      outputDir: "/output/frames",
+      fps: 1,
+      preset: { width: null, format: "png", quality: null },
+      range: { start: 10, end: 25 },
+    });
+
+    expect(args.indexOf("-ss")).toBeLessThan(args.indexOf("-i"));
+    expect(args[args.indexOf("-ss") + 1]).toBe("10");
+    expect(args[args.indexOf("-t") + 1]).toBe("15");
+  });
+
+  it("surfaces the abort reason rather than a wrapped FFmpeg error", async () => {
+    const reason = new Error("job timed out");
+    mockExec.mockRejectedValue(new Error("killed"));
+
+    await expect(
+      extractFrames({
+        videoPath: "/tmp/video.mp4",
+        outputDir: "/output/frames",
+        fps: 1,
+        preset: { width: 1024, format: "jpeg", quality: 80 },
+        signal: AbortSignal.abort(reason),
+      }),
+    ).rejects.toBe(reason);
+  });
+
+  it("filters and sorts frame files", async () => {
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
 
     mockReaddir.mockResolvedValue([
       "frame_0003.jpg",

@@ -53,7 +53,7 @@ describe("CleanupScheduler", () => {
     it("removes expired completed jobs", async () => {
       const expiredTime = new Date(Date.now() - 7200_000).toISOString(); // 2h ago
       mockReaddir.mockResolvedValue(
-        ["cap_old"] as unknown as Awaited<ReturnType<typeof readdir>>,
+        ["cap_00000010"] as unknown as Awaited<ReturnType<typeof readdir>>,
       );
       mockReadFile.mockResolvedValue(makeJobJson("completed", expiredTime));
       mockRm.mockResolvedValue(undefined);
@@ -68,7 +68,7 @@ describe("CleanupScheduler", () => {
     it("removes expired failed jobs", async () => {
       const expiredTime = new Date(Date.now() - 7200_000).toISOString();
       mockReaddir.mockResolvedValue(
-        ["cap_failed"] as unknown as Awaited<ReturnType<typeof readdir>>,
+        ["cap_00000014"] as unknown as Awaited<ReturnType<typeof readdir>>,
       );
       mockReadFile.mockResolvedValue(makeJobJson("failed", expiredTime));
       mockRm.mockResolvedValue(undefined);
@@ -83,7 +83,7 @@ describe("CleanupScheduler", () => {
     it("skips non-expired jobs", async () => {
       const recentTime = new Date(Date.now() - 1000).toISOString(); // 1s ago
       mockReaddir.mockResolvedValue(
-        ["cap_recent"] as unknown as Awaited<ReturnType<typeof readdir>>,
+        ["cap_00000011"] as unknown as Awaited<ReturnType<typeof readdir>>,
       );
       mockReadFile.mockResolvedValue(makeJobJson("completed", recentTime));
 
@@ -96,7 +96,7 @@ describe("CleanupScheduler", () => {
 
     it("skips pending/processing jobs", async () => {
       mockReaddir.mockResolvedValue(
-        ["cap_pending", "cap_processing"] as unknown as Awaited<ReturnType<typeof readdir>>,
+        ["cap_00000013", "cap_00000012"] as unknown as Awaited<ReturnType<typeof readdir>>,
       );
       mockReadFile
         .mockResolvedValueOnce(makeJobJson("pending", null))
@@ -138,7 +138,7 @@ describe("CleanupScheduler", () => {
 
     it("logs a warning and skips a job.json with an invalid shape, without deleting the dir", async () => {
       mockReaddir.mockResolvedValue(
-        ["cap_invalid"] as unknown as Awaited<ReturnType<typeof readdir>>,
+        ["cap_0000bad1"] as unknown as Awaited<ReturnType<typeof readdir>>,
       );
       mockReadFile.mockResolvedValue(JSON.stringify({ id: 42 }));
 
@@ -149,7 +149,7 @@ describe("CleanupScheduler", () => {
       expect(mockRm).not.toHaveBeenCalled();
       expect(logger.warn).toHaveBeenCalledWith(
         expect.objectContaining({
-          jobJsonPath: expect.stringContaining("cap_invalid") as string,
+          jobJsonPath: expect.stringContaining("cap_0000bad1") as string,
         }),
         "Skipping invalid job.json during cleanup sweep",
       );
@@ -237,7 +237,7 @@ describe("CleanupScheduler", () => {
         if (path === tmpdir()) {
           return Promise.reject(new Error("EPERM: operation not permitted"));
         }
-        return Promise.resolve(["cap_old"] as unknown as Awaited<ReturnType<typeof readdir>>);
+        return Promise.resolve(["cap_00000010"] as unknown as Awaited<ReturnType<typeof readdir>>);
       });
       mockReadFile.mockResolvedValue(makeJobJson("completed", expiredTime));
       mockRm.mockResolvedValue(undefined);

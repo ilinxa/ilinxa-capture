@@ -1,4 +1,18 @@
 import { z } from "zod";
+import { JOB_ID_PATTERN } from "../core/job-id.js";
+import {
+  combinedOptionsShape,
+  composeOptionsShape,
+  extractOptionsShape,
+  httpUrlSchema,
+  restScalars,
+  videoDownloadOptionsShape,
+} from "../core/options.js";
+
+const jobIdSchema = z.string().regex(JOB_ID_PATTERN, "Invalid job ID");
+
+// webhook_url is the one option with no MCP equivalent: an agent polls instead.
+const webhookShape = { webhook_url: httpUrlSchema.optional() };
 
 export const metadataRequestSchema = z.object({
   source: z.string().min(1),
@@ -21,14 +35,8 @@ export type MetadataResponse = z.infer<typeof metadataResponseSchema>;
 // --- Extract ---
 
 export const extractRequestSchema = z.object({
-  source: z.string().min(1),
-  fps: z.coerce.number().int().min(1).max(30),
-  preset: z.enum(["llm", "high", "custom"]).default("llm"),
-  width: z.coerce.number().int().positive().optional(),
-  format: z.enum(["jpeg", "png"]).optional(),
-  quality: z.coerce.number().int().min(1).max(100).optional(),
-  async: z.coerce.boolean().default(false),
-  webhook_url: z.string().url().optional(),
+  ...extractOptionsShape(restScalars),
+  ...webhookShape,
 });
 
 export type ExtractRequest = z.infer<typeof extractRequestSchema>;
@@ -40,15 +48,22 @@ export const sourceMetadataSchema = z.object({
   fps: z.number(),
 });
 
+const framesSchema = z.object({
+  count: z.number().int(),
+  files: z.array(z.string()),
+  urls: z.array(z.string()),
+  timestamps: z.array(z.number()),
+});
+
+const rangeSchema = z.object({ start: z.number(), end: z.number() }).nullable();
+
 export const extractResponseSchema = z.object({
   job_id: z.string(),
   status: z.literal("completed"),
-  frames: z.object({
-    count: z.number().int(),
-    files: z.array(z.string()),
-    urls: z.array(z.string()),
-  }),
+  frames: framesSchema,
   source_metadata: sourceMetadataSchema,
+  range: rangeSchema,
+  manifest_url: z.string(),
   processing_time_ms: z.number(),
 });
 
@@ -56,22 +71,9 @@ export type ExtractResponse = z.infer<typeof extractResponseSchema>;
 
 // --- Compose ---
 
-const modeSchema = z.coerce
-  .number()
-  .int()
-  .refine((v): v is 1 | 4 | 16 => [1, 4, 16].includes(v), {
-    message: "Mode must be 1, 4, or 16",
-  });
-
 export const composeRequestSchema = z.object({
-  job_id: z.string().optional(),
-  frames: z.array(z.string()).min(1).optional(),
-  mode: modeSchema,
-  overlay_frame_number: z.coerce.boolean().default(false),
-  overlay_timestamp: z.coerce.boolean().default(false),
-  fps: z.coerce.number().positive().optional(),
-  async: z.coerce.boolean().default(false),
-  webhook_url: z.string().url().optional(),
+  ...composeOptionsShape(restScalars),
+  ...webhookShape,
 });
 
 export type ComposeRequest = z.infer<typeof composeRequestSchema>;
@@ -95,10 +97,9 @@ export type ComposeResponse = z.infer<typeof composeResponseSchema>;
 
 // --- Combined (Extract + Compose) ---
 
-export const combinedRequestSchema = extractRequestSchema.extend({
-  mode: modeSchema,
-  overlay_frame_number: z.coerce.boolean().default(false),
-  overlay_timestamp: z.coerce.boolean().default(false),
+export const combinedRequestSchema = z.object({
+  ...combinedOptionsShape(restScalars),
+  ...webhookShape,
 });
 
 export type CombinedRequest = z.infer<typeof combinedRequestSchema>;
@@ -106,13 +107,11 @@ export type CombinedRequest = z.infer<typeof combinedRequestSchema>;
 export const combinedResponseSchema = z.object({
   job_id: z.string(),
   status: z.literal("completed"),
-  frames: z.object({
-    count: z.number().int(),
-    files: z.array(z.string()),
-    urls: z.array(z.string()),
-  }),
+  frames: framesSchema,
   sheets: sheetsSchema,
   source_metadata: sourceMetadataSchema,
+  range: rangeSchema,
+  manifest_url: z.string(),
   processing_time_ms: z.number(),
 });
 
@@ -129,7 +128,7 @@ export const asyncJobResponseSchema = z.object({
 export type AsyncJobResponse = z.infer<typeof asyncJobResponseSchema>;
 
 export const jobIdParamsSchema = z.object({
-  id: z.string().min(1),
+  id: jobIdSchema,
 });
 
 export type JobIdParams = z.infer<typeof jobIdParamsSchema>;
@@ -137,7 +136,7 @@ export type JobIdParams = z.infer<typeof jobIdParamsSchema>;
 // --- File Serving ---
 
 export const fileParamsSchema = z.object({
-  jobId: z.string().min(1),
+  jobId: jobIdSchema,
   "*": z.string().min(1),
 });
 
@@ -172,7 +171,7 @@ const ytdlpFormatSchema = z.object({
 });
 
 export const videoFormatsRequestSchema = z.object({
-  url: z.string().url().min(1),
+  url: httpUrlSchema,
   headers: httpHeadersSchema,
 });
 
@@ -189,15 +188,8 @@ export type VideoFormatsResponse = z.infer<typeof videoFormatsResponseSchema>;
 // --- Video Download ---
 
 export const videoDownloadRequestSchema = z.object({
-  url: z.string().url().min(1),
-  preset: z
-    .enum(["best", "1080p", "720p", "480p", "360p", "audio_only"])
-    .optional(),
-  format_selector: z.string().optional(),
-  merge_format: z.enum(["mp4", "webm", "mkv", "mp3"]).default("mp4"),
-  headers: httpHeadersSchema,
-  async: z.coerce.boolean().default(false),
-  webhook_url: z.string().url().optional(),
+  ...videoDownloadOptionsShape(restScalars),
+  ...webhookShape,
 });
 
 export type VideoDownloadRequest = z.infer<typeof videoDownloadRequestSchema>;
@@ -221,7 +213,7 @@ export type VideoDownloadResponse = z.infer<
 // --- HLS Discovery ---
 
 export const hlsDiscoverRequestSchema = z.object({
-  url: z.string().url().min(1),
+  url: httpUrlSchema,
   headers: httpHeadersSchema,
 });
 

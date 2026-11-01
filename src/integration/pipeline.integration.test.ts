@@ -9,6 +9,7 @@ import type { AddressInfo } from "node:net";
 import sharp from "sharp";
 import { buildApp } from "../app.js";
 import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 import type { FastifyInstance } from "fastify";
 
 const execFileAsync = promisify(execFile);
@@ -23,28 +24,10 @@ const execFileAsync = promisify(execFile);
  * (ZIP download, file serving) — see MEMORY.md "Stream Testing" note.
  */
 function createIntegrationEnv(overrides: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "127.0.0.1",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
+  return createTestEnv({
     UI_DIR: "./ui/dist-does-not-exist", // force API-only mode
     ...overrides,
-  };
+  });
 }
 
 describe("pipeline integration (real ffmpeg/ffprobe/sharp)", () => {
@@ -214,8 +197,9 @@ describe("pipeline integration (real ffmpeg/ffprobe/sharp)", () => {
     expect(sheetFiles.length).toBe(body.sheets.count);
 
     const sheetMeta = await sharp(join(sheetsDir, sheetFiles[0]!)).metadata();
-    // 2x2 grid: canvas width == 2 * single frame width.
-    expect(sheetMeta.width).toBe(2 * firstFrameWidth);
+    // 2x2 grid of llm frames: two cells wide, shrunk to fit MAX_SHEET_EDGE.
+    expect(sheetMeta.width).toBe(2 * Math.floor(2000 / 2));
+    expect(sheetMeta.width).toBeLessThan(2 * firstFrameWidth);
     expect(sheetMeta.format).toBe("jpeg");
   });
 

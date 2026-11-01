@@ -8,12 +8,12 @@ import {
 
 // ─── Mock child_process for downloadHlsStream ──────────────────────
 
-vi.mock("node:child_process", () => ({
-  execFile: vi.fn(),
+vi.mock("../utils/exec.js", () => ({
+  execFileAsync: vi.fn(),
 }));
 
-import { execFile } from "node:child_process";
-const mockExecFile = vi.mocked(execFile);
+import { execFileAsync } from "../utils/exec.js";
+const mockExec = vi.mocked(execFileAsync);
 
 // ─── Mock global fetch ─────────────────────────────────────────────
 
@@ -307,22 +307,15 @@ describe("discoverHlsUrls", () => {
 
 describe("downloadHlsStream", () => {
   it("calls FFmpeg with correct arguments", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
 
     await downloadHlsStream(
       "https://cdn.example.com/stream.m3u8",
       "/output/stream.mp4",
     );
 
-    expect(mockExecFile).toHaveBeenCalledTimes(1);
-    const call = mockExecFile.mock.calls[0]!;
+    expect(mockExec).toHaveBeenCalledTimes(1);
+    const call = mockExec.mock.calls[0]!;
     expect(call[0]).toBe("ffmpeg");
 
     const args = call[1] as string[];
@@ -339,14 +332,7 @@ describe("downloadHlsStream", () => {
   });
 
   it("passes custom headers via -headers flag", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
 
     await downloadHlsStream(
       "https://cdn.example.com/stream.m3u8",
@@ -354,7 +340,7 @@ describe("downloadHlsStream", () => {
       { Referer: "https://example.com/", Cookie: "session=abc" },
     );
 
-    const args = mockExecFile.mock.calls[0]![1] as string[];
+    const args = mockExec.mock.calls[0]![1] as string[];
     expect(args).toContain("-headers");
     const headersIndex = args.indexOf("-headers");
     const headerValue = args[headersIndex + 1]!;
@@ -363,33 +349,19 @@ describe("downloadHlsStream", () => {
   });
 
   it("does not include -headers when no headers provided", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: null, stdout: string, stderr: string) => void)(
-        null,
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
 
     await downloadHlsStream(
       "https://cdn.example.com/stream.m3u8",
       "/output/stream.mp4",
     );
 
-    const args = mockExecFile.mock.calls[0]![1] as string[];
+    const args = mockExec.mock.calls[0]![1] as string[];
     expect(args).not.toContain("-headers");
   });
 
   it("throws HlsParseError on FFmpeg failure", async () => {
-    mockExecFile.mockImplementation((_cmd, _args, _opts, callback) => {
-      (callback as (err: Error, stdout: string, stderr: string) => void)(
-        new Error("ffmpeg crashed"),
-        "",
-        "",
-      );
-      return undefined as never;
-    });
+    mockExec.mockRejectedValue(new Error("ffmpeg crashed"));
 
     await expect(
       downloadHlsStream(

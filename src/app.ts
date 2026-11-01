@@ -18,9 +18,18 @@ import { createLoggerOptions } from "./utils/logger.js";
 import { registerRoutes } from "./api/routes.js";
 import type { ErrorResponse } from "./utils/errors.js";
 import { JobManager } from "./core/job-manager.js";
+import { InputPolicy } from "./core/input-policy.js";
+import { CaptureService } from "./core/service.js";
 import { LocalStorage } from "./core/storage.js";
 import type { Storage } from "./core/storage.js";
 import { mcpHttpPlugin } from "./mcp/server.js";
+import { createNetGuard, registerNetGuard } from "./api/lib/net-guard.js";
+
+declare module "fastify" {
+  interface FastifyInstance {
+    jobManager: JobManager;
+  }
+}
 
 export interface AppOptions {
   env: Env;
@@ -41,9 +50,17 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.setValidatorCompiler(validatorCompiler);
   app.setSerializerCompiler(serializerCompiler);
 
+  // Before anything else that handles a request, CORS preflights included
+  const netGuard = createNetGuard(opts.env);
+  registerNetGuard(app, netGuard);
+
   // Infrastructure plugins
   await app.register(fastifySensible);
-  await app.register(fastifyCors, { origin: true, credentials: true });
+  await app.register(fastifyCors, {
+    // Same-origin requests need no CORS grant; only configured sites get one
+    origin: (origin, callback) =>
+      callback(null, origin !== undefined && netGuard.isListedOrigin(origin)),
+  });
   await app.register(fastifyHelmet, { contentSecurityPolicy: false });
   await app.register(fastifyMultipart, {
     limits: { fileSize: opts.env.MAX_UPLOAD_SIZE },
@@ -80,6 +97,13 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   // Job manager
   const jobManager = new JobManager(opts.env, app.log);
   await jobManager.recover();
+  app.decorate("jobManager", jobManager);
+
+  const service = new CaptureService(
+    opts.env,
+    jobManager,
+    InputPolicy.fromEnv(opts.env, "http"),
+  );
 
   // Storage
   const storage = opts.storage ?? new LocalStorage(resolve(opts.env.LOCAL_OUTPUT_DIR));
@@ -89,10 +113,19 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   });
 
   // Routes
-  await app.register(registerRoutes, { env: opts.env, jobManager, storage });
+  await app.register(registerRoutes, {
+    env: opts.env,
+    jobManager,
+    storage,
+    service,
+  });
 
   // MCP Streamable HTTP transport at /mcp
-  await app.register(mcpHttpPlugin, { env: opts.env, jobManager });
+  await app.register(mcpHttpPlugin, {
+    env: opts.env,
+    jobManager,
+    inputMode: "http",
+  });
 
   // Static UI serving — only when ui/dist exists (skipped in tests / API-only mode)
   const uiDir = resolve(opts.env.UI_DIR);

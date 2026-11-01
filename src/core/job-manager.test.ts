@@ -14,7 +14,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 import { mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { JobManager } from "./job-manager.js";
-import type { Env } from "../lib/env.js";
+import { createTestEnv } from "../test/env.js";
 
 
 const mockMkdir = vi.mocked(mkdir);
@@ -22,31 +22,6 @@ const mockWriteFile = vi.mocked(writeFile);
 const mockReadFile = vi.mocked(readFile);
 const mockReaddir = vi.mocked(readdir);
 const mockRm = vi.mocked(rm);
-
-function createTestEnv(overrides?: Partial<Env>): Env {
-  return {
-    PORT: 3000,
-    HOST: "0.0.0.0",
-    NODE_ENV: "test",
-    LOG_LEVEL: "error",
-    STORAGE_MODE: "local",
-    LOCAL_OUTPUT_DIR: "./data/jobs",
-    LOCAL_TTL_SECONDS: 3600,
-    S3_BUCKET: undefined,
-    S3_REGION: undefined,
-    S3_ACCESS_KEY_ID: undefined,
-    S3_SECRET_ACCESS_KEY: undefined,
-    S3_ENDPOINT: undefined,
-    S3_URL_EXPIRY: undefined,
-    MAX_VIDEO_DURATION: 600,
-    MAX_UPLOAD_SIZE: 524288000,
-    MAX_CONCURRENT_JOBS: 3,
-    JOB_TIMEOUT: 300,
-    MCP_SESSION_TTL: 1800,
-    UI_DIR: "./ui/dist",
-    ...overrides,
-  };
-}
 
 const mockLogger = {
   info: vi.fn(),
@@ -120,7 +95,7 @@ describe("JobManager", () => {
     });
 
     it("throws JobNotFoundError for unknown job", () => {
-      expect(() => jobManager.getJob("cap_unknown")).toThrow("not found");
+      expect(() => jobManager.getJob("cap_0000dead")).toThrow("not found");
     });
   });
 
@@ -139,7 +114,7 @@ describe("JobManager", () => {
     });
 
     it("throws JobNotFoundError for unknown job", async () => {
-      await expect(jobManager.deleteJob("cap_unknown")).rejects.toThrow(
+      await expect(jobManager.deleteJob("cap_0000dead")).rejects.toThrow(
         "not found",
       );
     });
@@ -321,16 +296,16 @@ describe("JobManager", () => {
   describe("recover", () => {
     it("loads jobs from disk and marks stuck ones as failed", async () => {
       mockReaddir.mockResolvedValue([
-        "cap_job1",
-        "cap_job2",
-        "cap_job3",
+        "cap_00000001",
+        "cap_00000002",
+        "cap_00000003",
       ] as unknown as Awaited<ReturnType<typeof readdir>>);
 
       mockReadFile.mockImplementation(async (filePath) => {
         const path = String(filePath);
-        if (path.includes("cap_job1")) {
+        if (path.includes("cap_00000001")) {
           return JSON.stringify({
-            id: "cap_job1",
+            id: "cap_00000001",
             type: "extract",
             status: "completed",
             created_at: "2026-01-01T00:00:00Z",
@@ -343,9 +318,9 @@ describe("JobManager", () => {
             processing_time_ms: 4000,
           });
         }
-        if (path.includes("cap_job2")) {
+        if (path.includes("cap_00000002")) {
           return JSON.stringify({
-            id: "cap_job2",
+            id: "cap_00000002",
             type: "extract",
             status: "processing",
             created_at: "2026-01-01T00:00:00Z",
@@ -358,9 +333,9 @@ describe("JobManager", () => {
             processing_time_ms: null,
           });
         }
-        if (path.includes("cap_job3")) {
+        if (path.includes("cap_00000003")) {
           return JSON.stringify({
-            id: "cap_job3",
+            id: "cap_00000003",
             type: "compose",
             status: "pending",
             created_at: "2026-01-01T00:00:00Z",
@@ -378,14 +353,14 @@ describe("JobManager", () => {
 
       await jobManager.recover();
 
-      const job1 = jobManager.getJob("cap_job1");
+      const job1 = jobManager.getJob("cap_00000001");
       expect(job1.status).toBe("completed");
 
-      const job2 = jobManager.getJob("cap_job2");
+      const job2 = jobManager.getJob("cap_00000002");
       expect(job2.status).toBe("failed");
       expect(job2.error).toBe("Server restarted during processing");
 
-      const job3 = jobManager.getJob("cap_job3");
+      const job3 = jobManager.getJob("cap_00000003");
       expect(job3.status).toBe("failed");
       expect(job3.error).toBe("Server restarted during processing");
     });
@@ -400,15 +375,15 @@ describe("JobManager", () => {
 
     it("skips directories without valid job.json", async () => {
       mockReaddir.mockResolvedValue([
-        "cap_valid",
+        "cap_0000a11d",
         "some_other_dir",
       ] as unknown as Awaited<ReturnType<typeof readdir>>);
 
       mockReadFile.mockImplementation(async (filePath) => {
         const path = String(filePath);
-        if (path.includes("cap_valid")) {
+        if (path.includes("cap_0000a11d")) {
           return JSON.stringify({
-            id: "cap_valid",
+            id: "cap_0000a11d",
             type: "extract",
             status: "completed",
             created_at: "2026-01-01T00:00:00Z",
@@ -426,25 +401,25 @@ describe("JobManager", () => {
 
       await jobManager.recover();
 
-      expect(jobManager.getJob("cap_valid")).toBeDefined();
+      expect(jobManager.getJob("cap_0000a11d")).toBeDefined();
       expect(() => jobManager.getJob("some_other_dir")).toThrow("not found");
     });
 
     it("skips a malformed job.json (wrong shape) with a warn log and does not add it to the jobs map", async () => {
       mockReaddir.mockResolvedValue([
-        "cap_malformed",
-        "cap_valid",
+        "cap_0000bad0",
+        "cap_0000a11d",
       ] as unknown as Awaited<ReturnType<typeof readdir>>);
 
       mockReadFile.mockImplementation(async (filePath) => {
         const path = String(filePath);
-        if (path.includes("cap_malformed")) {
+        if (path.includes("cap_0000bad0")) {
           // Valid JSON, but does not conform to jobStateSchema.
           return JSON.stringify({ id: 42 });
         }
-        if (path.includes("cap_valid")) {
+        if (path.includes("cap_0000a11d")) {
           return JSON.stringify({
-            id: "cap_valid",
+            id: "cap_0000a11d",
             type: "extract",
             status: "completed",
             created_at: "2026-01-01T00:00:00Z",
@@ -463,23 +438,23 @@ describe("JobManager", () => {
       await jobManager.recover();
 
       expect(mockLogger.warn).toHaveBeenCalledWith(
-        { jobJsonPath: expect.stringContaining("cap_malformed") as string },
+        { jobJsonPath: expect.stringContaining("cap_0000bad0") as string },
         "Skipping invalid job.json during recovery",
       );
-      expect(() => jobManager.getJob("cap_malformed")).toThrow("not found");
-      expect(jobManager.getJob("cap_valid")).toBeDefined();
+      expect(() => jobManager.getJob("cap_0000bad0")).toThrow("not found");
+      expect(jobManager.getJob("cap_0000a11d")).toBeDefined();
     });
 
     it("recovers a job.json from an older build that lacks newer optional fields", async () => {
       mockReaddir.mockResolvedValue([
-        "cap_legacy",
+        "cap_0000a9ed",
       ] as unknown as Awaited<ReturnType<typeof readdir>>);
 
       mockReadFile.mockImplementation(async () =>
         // Simulates a job.json persisted before webhook_url and
         // processing_time_ms existed — keys entirely absent, not null.
         JSON.stringify({
-          id: "cap_legacy",
+          id: "cap_0000a9ed",
           type: "extract",
           status: "completed",
           created_at: "2026-01-01T00:00:00Z",
@@ -493,7 +468,7 @@ describe("JobManager", () => {
 
       await jobManager.recover();
 
-      const job = jobManager.getJob("cap_legacy");
+      const job = jobManager.getJob("cap_0000a9ed");
       expect(job.status).toBe("completed");
       expect(job.webhook_url).toBeNull();
       expect(job.processing_time_ms).toBeNull();
