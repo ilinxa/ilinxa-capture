@@ -212,6 +212,7 @@ describe("MCP Server", () => {
       const result = await client.listTools();
       const names = result.tools.map((t) => t.name).sort();
       expect(names).toEqual([
+        "capture_audio",
         "capture_compose",
         "capture_extract",
         "capture_extract_and_compose",
@@ -220,6 +221,7 @@ describe("MCP Server", () => {
         "capture_job_manifest",
         "capture_job_status",
         "capture_metadata",
+        "capture_shots",
         "capture_video_download",
         "capture_video_formats",
       ]);

@@ -12,11 +12,13 @@ import { JOB_ID_PATTERN } from "../core/job-id.js";
 import type { JobManager, JobProgress, JobState } from "../core/job-manager.js";
 import { manifestPath, readManifest } from "../core/manifest.js";
 import {
+  audioOptionsShape,
   combinedOptionsShape,
   composeOptionsShape,
   extractOptionsShape,
   httpUrlSchema,
   mcpScalars,
+  shotsOptionsShape,
   videoDownloadOptionsShape,
 } from "../core/options.js";
 import { CaptureService, type Submission } from "../core/service.js";
@@ -97,9 +99,10 @@ function inlineList<T>(items: T[]): T[] {
 function compactResult(result: unknown, jobDir: string): unknown {
   if (typeof result !== "object" || result === null) return result;
 
-  const { frames, sheets, manifest_url: _url, ...rest } = result as {
+  const { frames, sheets, shots, manifest_url: _url, ...rest } = result as {
     frames?: { count: number; files: string[]; timestamps?: number[] };
     sheets?: { count: number; files: string[] } & Record<string, unknown>;
+    shots?: { count: number; items: unknown[] };
     manifest_url?: string;
   };
 
@@ -113,6 +116,13 @@ function compactResult(result: unknown, jobDir: string): unknown {
       truncated: frames.count > INLINE_LIMIT,
     };
     output["manifest_file"] = manifestPath(jobDir);
+  }
+  if (shots) {
+    output["shots"] = {
+      count: shots.count,
+      items: inlineList(shots.items),
+      truncated: shots.count > INLINE_LIMIT,
+    };
   }
   if (sheets) {
     const { urls: _urls, ...sheetFields } = sheets as typeof sheets & {
@@ -242,7 +252,57 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       }),
   );
 
-  // ─── Tool 5: capture_video_formats ──────────────────────────────────
+  // ─── Tool 5: capture_shots ──────────────────────────────────────────
+
+  server.registerTool(
+    "capture_shots",
+    {
+      description:
+        "Detect the shots in a video: where each starts and ends and how long it lasts, " +
+        "with first, middle or last frames from each, labeled by shot and real timestamp. " +
+        "Compose the frames with capture_compose and this job_id. Finds hard cuts well; " +
+        "lower scene_threshold if dissolves are missed. Decodes the whole range, so for " +
+        "long videos pass async: true and poll capture_job_status.",
+      inputSchema: shotsOptionsShape(mcpScalars),
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async (args, extra) =>
+      guarded(async () => {
+        const source = await service.resolveSource(args.source);
+        return outcome(
+          await service.detectShots(source, args, {
+            async: args.async,
+            onProgress: progressSender(extra),
+          }),
+        );
+      }),
+  );
+
+  // ─── Tool 6: capture_audio ──────────────────────────────────────────
+
+  server.registerTool(
+    "capture_audio",
+    {
+      description:
+        "Export the audio track of a video for separate speech or music models, " +
+        "choosing the stream, sample rate, channels and format. With start and end, " +
+        "add timeline_offset to a time in the audio to get a time in the video.",
+      inputSchema: audioOptionsShape(mcpScalars),
+      annotations: { readOnlyHint: false, openWorldHint: true },
+    },
+    async (args, extra) =>
+      guarded(async () => {
+        const source = await service.resolveSource(args.source);
+        return outcome(
+          await service.extractAudio(source, args, {
+            async: args.async,
+            onProgress: progressSender(extra),
+          }),
+        );
+      }),
+  );
+
+  // ─── Tool 7: capture_video_formats ──────────────────────────────────
 
   server.registerTool(
     "capture_video_formats",
@@ -265,7 +325,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
     async ({ url, headers }) => guarded(() => listVideoFormats(url, headers)),
   );
 
-  // ─── Tool 6: capture_video_download ───────────────────────────────
+  // ─── Tool 8: capture_video_download ───────────────────────────────
 
   server.registerTool(
     "capture_video_download",
@@ -288,7 +348,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       ),
   );
 
-  // ─── Tool 7: capture_hls_discover ──────────────────────────────────
+  // ─── Tool 9: capture_hls_discover ──────────────────────────────────
 
   server.registerTool(
     "capture_hls_discover",
@@ -308,7 +368,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
     async ({ url, headers }) => guarded(() => discoverHlsUrls(url, headers)),
   );
 
-  // ─── Tool 8: capture_job_status ─────────────────────────────────────
+  // ─── Tool 10: capture_job_status ────────────────────────────────────
 
   const jobIdInput = z
     .string()
@@ -327,7 +387,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       guarded(async () => compactJob(jobManager.getJob(job_id))),
   );
 
-  // ─── Tool 9: capture_job_manifest ───────────────────────────────────
+  // ─── Tool 11: capture_job_manifest ──────────────────────────────────
 
   server.registerTool(
     "capture_job_manifest",
@@ -371,7 +431,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       }),
   );
 
-  // ─── Tool 10: capture_job_delete ────────────────────────────────────
+  // ─── Tool 12: capture_job_delete ────────────────────────────────────
 
   server.registerTool(
     "capture_job_delete",

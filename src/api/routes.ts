@@ -5,9 +5,8 @@ import type { Storage } from "../core/storage.js";
 import type { CaptureService } from "../core/service.js";
 import { healthCheckHandler, healthResponseSchema } from "./health.handler.js";
 import { createMetadataHandler } from "./metadata.handler.js";
-import { createExtractHandler } from "./extract.handler.js";
+import { createVideoJobHandler } from "./video-job.handler.js";
 import { createComposeHandler } from "./compose.handler.js";
-import { createCombinedHandler } from "./combined.handler.js";
 import {
   createGetJobHandler,
   createDeleteJobHandler,
@@ -20,9 +19,15 @@ import { createVideoServeHandler } from "./video-serve.handler.js";
 import { createHlsDiscoverHandler } from "./hls-discover.handler.js";
 import {
   metadataResponseSchema,
+  extractRequestSchema,
   extractResponseSchema,
   composeResponseSchema,
+  combinedRequestSchema,
   combinedResponseSchema,
+  shotsRequestSchema,
+  shotsResponseSchema,
+  audioRequestSchema,
+  audioResponseSchema,
   asyncJobResponseSchema,
   jobIdParamsSchema,
   fileParamsSchema,
@@ -43,6 +48,8 @@ export async function registerRoutes(
   app: FastifyInstance,
   opts: RouteOptions,
 ): Promise<void> {
+  const { service } = opts;
+
   app.get(
     "/api/v1/health",
     {
@@ -73,7 +80,9 @@ export async function registerRoutes(
         },
       },
     },
-    createExtractHandler(opts.service),
+    createVideoJobHandler(service, extractRequestSchema, (source, options, run) =>
+      service.extract(source, options, run),
+    ),
   );
 
   app.post(
@@ -99,7 +108,39 @@ export async function registerRoutes(
         },
       },
     },
-    createCombinedHandler(opts.service),
+    createVideoJobHandler(service, combinedRequestSchema, (source, options, run) =>
+      service.extractAndCompose(source, options, run),
+    ),
+  );
+
+  app.post(
+    "/api/v1/shots",
+    {
+      schema: {
+        response: {
+          200: shotsResponseSchema,
+          202: asyncJobResponseSchema,
+        },
+      },
+    },
+    createVideoJobHandler(service, shotsRequestSchema, (source, options, run) =>
+      service.detectShots(source, options, run),
+    ),
+  );
+
+  app.post(
+    "/api/v1/audio",
+    {
+      schema: {
+        response: {
+          200: audioResponseSchema,
+          202: asyncJobResponseSchema,
+        },
+      },
+    },
+    createVideoJobHandler(service, audioRequestSchema, (source, options, run) =>
+      service.extractAudio(source, options, run),
+    ),
   );
 
   app.get(

@@ -1,5 +1,5 @@
 import { readdir, rm, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { Env } from "../lib/env.js";
 import {
   JobBusyError,
@@ -7,6 +7,7 @@ import {
   ValidationError,
   VideoTooLongError,
 } from "../utils/errors.js";
+import { extractAudio } from "./audio.js";
 import { buildFileUrls } from "./file-urls.js";
 import { composeGrid, type FrameLabel } from "./composer.js";
 import {
@@ -36,12 +37,15 @@ import {
 import { getVideoMetadata, type VideoMetadata } from "./metadata.js";
 import { compareNatural } from "./natural-sort.js";
 import type {
+  AudioOptions,
   CombinedOptions,
   ComposeOptions,
   ExtractOptions,
+  ShotsOptions,
   VideoDownloadOptions,
 } from "./options.js";
 import { resolvePreset, type PresetName, type ResolvedPreset } from "./presets.js";
+import { detectShots, extractShotFrames, planShotFrames } from "./shots.js";
 import { resolveRange } from "./timecode.js";
 
 // Readable as "video" by FFmpeg, but they pull in other files or streams.
@@ -106,6 +110,46 @@ export interface ComposeResult {
 
 export interface CombinedResult extends ExtractResult {
   sheets: SheetSet;
+}
+
+export interface ShotEntry {
+  index: number;
+  start: number;
+  end: number;
+  duration: number;
+  /** Indexes into the job's frames. */
+  frames: number[];
+}
+
+export interface ShotsResult {
+  job_id: string;
+  status: "completed";
+  shots: { count: number; items: ShotEntry[] };
+  frames: FrameSet;
+  source_metadata: SourceSummary;
+  range: TimeRange | null;
+  manifest_url: string;
+  processing_time_ms: number;
+}
+
+export interface AudioResult {
+  job_id: string;
+  status: "completed";
+  audio: {
+    file: string;
+    url: string;
+    format: string;
+    stream: number;
+    sample_rate: number;
+    channels: number;
+    duration: number;
+    size_bytes: number;
+  };
+  /** Add this to a time in the audio to get a time in the source video. */
+  timeline_offset: number;
+  source_metadata: SourceSummary;
+  range: TimeRange | null;
+  processing_time_ms: number;
 }
 
 export interface VideoDownloadResult {
@@ -303,6 +347,145 @@ export class CaptureService {
           source_metadata: summarize(metadata),
           range: range ?? null,
           manifest_url: manifestUrl(jobId),
+          processing_time_ms: Date.now() - startTime,
+        };
+      }),
+    );
+  }
+
+  async detectShots(
+    source: SourceInput,
+    options: ShotsOptions,
+    run: RunOptions = {},
+  ): Promise<Submission<ShotsResult>> {
+    const preset = resolvePreset(options.preset, options);
+
+    return this.submit("shots", run, (ctx, jobId) =>
+      this.withSource(source, options, ctx, run, async (path, metadata, range) => {
+        const startTime = Date.now();
+        const span = range ?? { start: 0, end: metadata.duration };
+
+        const shots = await detectShots({
+          videoPath: path,
+          threshold: options.scene_threshold,
+          minShotSeconds: options.min_shot_seconds,
+          span,
+          range,
+          signal: ctx.signal,
+          onProgress: (percent) =>
+            report(ctx, run, { stage: "detecting", percent: Math.floor(percent) }),
+        });
+
+        const targets = planShotFrames(
+          shots,
+          options.frame_positions,
+          metadata.fps > 0 ? 1 / metadata.fps : 0.04,
+        );
+        const captured = await extractShotFrames({
+          videoPath: path,
+          outputDir: join(this.jobs.getJobDir(jobId), "frames"),
+          targets,
+          preset,
+          signal: ctx.signal,
+          onProgress: (percent) =>
+            report(ctx, run, { stage: "capturing", percent: Math.floor(percent) }),
+        });
+
+        const frames: FrameSet = {
+          count: captured.length,
+          files: captured.map((frame) => frame.file),
+          urls: buildFileUrls(jobId, captured.map((frame) => frame.file)),
+          timestamps: captured.map((frame) => roundTime(frame.time)),
+        };
+
+        const items: ShotEntry[] = shots.map((shot) => ({
+          index: shot.index,
+          start: roundTime(shot.start),
+          end: roundTime(shot.end),
+          duration: roundTime(shot.duration),
+          frames: captured.flatMap((frame, i) =>
+            frame.shot === shot.index ? [i] : [],
+          ),
+        }));
+
+        await writeManifest(this.jobs.getJobDir(jobId), {
+          version: 1,
+          preset: options.preset,
+          fps: null,
+          range: range ?? null,
+          frames: captured.map((frame, index) => ({
+            index,
+            file: basename(frame.file),
+            pts_time: roundTime(frame.time),
+            shot: frame.shot,
+            position: frame.position,
+          })),
+          shots: items,
+        });
+
+        return {
+          job_id: jobId,
+          status: "completed",
+          shots: { count: items.length, items },
+          frames,
+          source_metadata: summarize(metadata),
+          range: range ?? null,
+          manifest_url: manifestUrl(jobId),
+          processing_time_ms: Date.now() - startTime,
+        };
+      }),
+    );
+  }
+
+  async extractAudio(
+    source: SourceInput,
+    options: AudioOptions,
+    run: RunOptions = {},
+  ): Promise<Submission<AudioResult>> {
+    return this.submit("audio", run, (ctx, jobId) =>
+      this.withSource(source, options, ctx, run, async (path, metadata, range) => {
+        const startTime = Date.now();
+
+        const stream = metadata.audio_streams[options.stream];
+        if (!stream) {
+          throw new ValidationError(
+            metadata.audio_streams.length === 0
+              ? "This video has no audio"
+              : `No audio stream ${options.stream}: this video has ${metadata.audio_streams.length}`,
+          );
+        }
+
+        const duration = range ? range.end - range.start : metadata.duration;
+        const audio = await extractAudio({
+          videoPath: path,
+          outputDir: join(this.jobs.getJobDir(jobId), "audio"),
+          format: options.format,
+          stream: options.stream,
+          sampleRate: options.sample_rate,
+          channels: options.channels,
+          range,
+          durationSeconds: duration,
+          signal: ctx.signal,
+          onProgress: (percent) =>
+            report(ctx, run, { stage: "extracting", percent: Math.floor(percent) }),
+        });
+
+        return {
+          job_id: jobId,
+          status: "completed",
+          audio: {
+            file: audio.file,
+            url: `/api/v1/files/${jobId}/audio/${basename(audio.file)}`,
+            format: options.format,
+            stream: options.stream,
+            sample_rate: options.sample_rate ?? stream.sample_rate,
+            channels: options.channels ?? stream.channels,
+            duration: roundTime(duration),
+            size_bytes: audio.sizeBytes,
+          },
+          timeline_offset: range?.start ?? 0,
+          source_metadata: summarize(metadata),
+          range: range ?? null,
           processing_time_ms: Date.now() - startTime,
         };
       }),

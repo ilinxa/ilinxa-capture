@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { JOB_ID_PATTERN } from "../core/job-id.js";
 import {
+  audioOptionsShape,
   combinedOptionsShape,
   composeOptionsShape,
   extractOptionsShape,
   httpUrlSchema,
   restScalars,
+  shotsOptionsShape,
   videoDownloadOptionsShape,
 } from "../core/options.js";
 
@@ -28,6 +30,18 @@ export const metadataResponseSchema = z.object({
   codec: z.string(),
   size_bytes: z.number().int(),
   format: z.string(),
+  audio_streams: z
+    .array(
+      z.object({
+        index: z.number().int(),
+        codec: z.string(),
+        channels: z.number().int(),
+        sample_rate: z.number().int(),
+        language: z.string().nullable(),
+        title: z.string().nullable(),
+      }),
+    )
+    .default([]),
 });
 
 export type MetadataResponse = z.infer<typeof metadataResponseSchema>;
@@ -116,6 +130,61 @@ export const combinedResponseSchema = z.object({
 });
 
 export type CombinedResponse = z.infer<typeof combinedResponseSchema>;
+
+// --- Shots ---
+
+export const shotsRequestSchema = z.object({
+  ...shotsOptionsShape(restScalars),
+  ...webhookShape,
+});
+
+export const shotsResponseSchema = z.object({
+  job_id: z.string(),
+  status: z.literal("completed"),
+  shots: z.object({
+    count: z.number().int(),
+    items: z.array(
+      z.object({
+        index: z.number().int(),
+        start: z.number(),
+        end: z.number(),
+        duration: z.number(),
+        frames: z.array(z.number().int()),
+      }),
+    ),
+  }),
+  frames: framesSchema,
+  source_metadata: sourceMetadataSchema,
+  range: rangeSchema,
+  manifest_url: z.string(),
+  processing_time_ms: z.number(),
+});
+
+// --- Audio ---
+
+export const audioRequestSchema = z.object({
+  ...audioOptionsShape(restScalars),
+  ...webhookShape,
+});
+
+export const audioResponseSchema = z.object({
+  job_id: z.string(),
+  status: z.literal("completed"),
+  audio: z.object({
+    file: z.string(),
+    url: z.string(),
+    format: z.string(),
+    stream: z.number().int(),
+    sample_rate: z.number().int(),
+    channels: z.number().int(),
+    duration: z.number(),
+    size_bytes: z.number().int(),
+  }),
+  timeline_offset: z.number(),
+  source_metadata: sourceMetadataSchema,
+  range: rangeSchema,
+  processing_time_ms: z.number(),
+});
 
 // --- Async Job ---
 

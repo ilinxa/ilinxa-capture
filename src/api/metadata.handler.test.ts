@@ -43,6 +43,7 @@ const sampleMetadata: VideoMetadata = {
   codec: "h264",
   size_bytes: 15234567,
   format: "mov",
+  audio_streams: [],
 };
 
 describe("POST /api/v1/metadata", () => {

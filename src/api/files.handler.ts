@@ -52,7 +52,9 @@ export function createFileHandler(jobManager: JobManager, storage: Storage) {
     // Audio tracks can run to gigabytes; images are small enough to buffer
     if (relativePath.startsWith("audio/")) {
       const info = await storage.getFileInfo(jobId, relativePath);
-      void reply
+      // Awaited: returning while a stream is still opening makes Fastify think
+      // nothing was sent, and it replies with an empty body.
+      await reply
         .header("content-type", contentType)
         .header("content-length", info.size)
         .send(storage.getFileStream(jobId, relativePath));

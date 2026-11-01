@@ -81,27 +81,19 @@ function overlayShape(s: Scalars) {
   };
 }
 
-function extractShape(s: Scalars) {
+function rangeShape() {
   return {
-    source: z.string().min(1).describe("Video file path or URL"),
-    fps: s
-      .number()
-      .min(0.001)
-      .max(30)
-      .optional()
-      .describe("Frames per second to sample, 0.001-30. Fractions are allowed"),
-    every_seconds: s
-      .number()
-      .min(0.04)
-      .max(3600)
-      .optional()
-      .describe("Sample one frame every N seconds, instead of fps"),
     start: timeSchema
       .optional()
       .describe("Start of the range to process: seconds, MM:SS or HH:MM:SS"),
     end: timeSchema
       .optional()
       .describe("End of the range to process: seconds, MM:SS or HH:MM:SS"),
+  };
+}
+
+function presetShape(s: Scalars) {
+  return {
     preset: z
       .enum(["llm", "high", "custom"])
       .default("llm")
@@ -123,6 +115,28 @@ function extractShape(s: Scalars) {
       .max(100)
       .optional()
       .describe("JPEG quality 1-100 (only with preset=custom)"),
+  };
+}
+
+const sourceSchema = z.string().min(1).describe("Video file path or URL");
+
+function extractShape(s: Scalars) {
+  return {
+    source: sourceSchema,
+    fps: s
+      .number()
+      .min(0.001)
+      .max(30)
+      .optional()
+      .describe("Frames per second to sample, 0.001-30. Fractions are allowed"),
+    every_seconds: s
+      .number()
+      .min(0.04)
+      .max(3600)
+      .optional()
+      .describe("Sample one frame every N seconds, instead of fps"),
+    ...rangeShape(),
+    ...presetShape(s),
   };
 }
 
@@ -164,6 +178,65 @@ export function combinedOptionsShape(s: Scalars) {
   };
 }
 
+export function shotsOptionsShape(s: Scalars) {
+  return {
+    source: sourceSchema,
+    ...rangeShape(),
+    scene_threshold: s
+      .number()
+      .min(0.01)
+      .max(1)
+      .default(0.3)
+      .describe(
+        "Scene change score that counts as a cut, 0.01-1. Lower finds more cuts",
+      ),
+    min_shot_seconds: s
+      .number()
+      .min(0)
+      .max(60)
+      .default(0.25)
+      .describe("Shortest shot to keep. Closer cuts are ignored"),
+    frame_positions: z
+      .array(z.enum(["first", "middle", "last"]))
+      .default(["middle"])
+      .describe("Frames to capture from each shot. Empty for the shot list only"),
+    ...presetShape(s),
+    ...jobShape(s),
+  };
+}
+
+export function audioOptionsShape(s: Scalars) {
+  return {
+    source: sourceSchema,
+    ...rangeShape(),
+    format: z
+      .enum(["wav", "flac", "mp3", "m4a"])
+      .default("wav")
+      .describe("Output format"),
+    stream: s
+      .number()
+      .int()
+      .nonnegative()
+      .default(0)
+      .describe("Which audio stream: 0 is the first. See audio_streams in metadata"),
+    sample_rate: s
+      .number()
+      .int()
+      .min(8000)
+      .max(192000)
+      .optional()
+      .describe("Sample rate in Hz, e.g. 16000 for speech models. Default: source rate"),
+    channels: s
+      .number()
+      .int()
+      .min(1)
+      .max(2)
+      .optional()
+      .describe("1 for mono, 2 for stereo. Default: as in the source"),
+    ...jobShape(s),
+  };
+}
+
 export function videoDownloadOptionsShape(s: Scalars) {
   return {
     url: httpUrlSchema.describe("Video URL to download"),
@@ -193,10 +266,14 @@ const types = {
   extract: z.object(extractOptionsShape(mcpScalars)),
   compose: z.object(composeOptionsShape(mcpScalars)),
   combined: z.object(combinedOptionsShape(mcpScalars)),
+  shots: z.object(shotsOptionsShape(mcpScalars)),
+  audio: z.object(audioOptionsShape(mcpScalars)),
   videoDownload: z.object(videoDownloadOptionsShape(mcpScalars)),
 };
 
 export type ExtractOptions = z.output<typeof types.extract>;
 export type ComposeOptions = z.output<typeof types.compose>;
 export type CombinedOptions = z.output<typeof types.combined>;
+export type ShotsOptions = z.output<typeof types.shots>;
+export type AudioOptions = z.output<typeof types.audio>;
 export type VideoDownloadOptions = z.output<typeof types.videoDownload>;

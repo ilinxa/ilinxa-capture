@@ -1,6 +1,16 @@
 import { ProcessingError } from "../utils/errors.js";
 import { execFileAsync } from "../utils/exec.js";
 
+export interface AudioStream {
+  /** Among audio streams only: 0 is the first audio stream. */
+  index: number;
+  codec: string;
+  channels: number;
+  sample_rate: number;
+  language: string | null;
+  title: string | null;
+}
+
 export interface VideoMetadata {
   duration: number;
   width: number;
@@ -9,6 +19,7 @@ export interface VideoMetadata {
   codec: string;
   size_bytes: number;
   format: string;
+  audio_streams: AudioStream[];
 }
 
 interface FfprobeStream {
@@ -18,6 +29,9 @@ interface FfprobeStream {
   height?: number;
   r_frame_rate?: string;
   duration?: string;
+  channels?: number;
+  sample_rate?: string;
+  tags?: { language?: string; title?: string };
 }
 
 interface FfprobeFormat {
@@ -108,5 +122,15 @@ export async function getVideoMetadata(
     codec: videoStream.codec_name ?? "unknown",
     size_bytes: sizeBytes,
     format: formatName,
+    audio_streams: (parsed.streams ?? [])
+      .filter((s) => s.codec_type === "audio")
+      .map((s, index) => ({
+        index,
+        codec: s.codec_name ?? "unknown",
+        channels: s.channels ?? 0,
+        sample_rate: parseInt(s.sample_rate ?? "0", 10),
+        language: s.tags?.language ?? null,
+        title: s.tags?.title ?? null,
+      })),
   };
 }

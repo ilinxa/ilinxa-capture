@@ -75,7 +75,34 @@ describe("getVideoMetadata", () => {
       codec: "h264",
       size_bytes: 15234567,
       format: "mov",
+      audio_streams: [],
     });
+  });
+
+  it("lists audio streams, numbered among audio streams only", async () => {
+    const stdout = JSON.stringify({
+      streams: [
+        { codec_type: "video", codec_name: "h264", width: 640, height: 360, r_frame_rate: "25/1" },
+        {
+          codec_type: "audio",
+          codec_name: "aac",
+          channels: 6,
+          sample_rate: "48000",
+          tags: { language: "eng", title: "Surround" },
+        },
+        { codec_type: "subtitle", codec_name: "subrip" },
+        { codec_type: "audio", codec_name: "ac3", channels: 2, sample_rate: "44100" },
+      ],
+      format: { duration: "10", size: "100", format_name: "matroska,webm" },
+    });
+    mockExec.mockResolvedValue({ stdout, stderr: "" });
+
+    const { audio_streams: streams } = await getVideoMetadata("/path/to/video.mkv");
+
+    expect(streams).toEqual([
+      { index: 0, codec: "aac", channels: 6, sample_rate: 48000, language: "eng", title: "Surround" },
+      { index: 1, codec: "ac3", channels: 2, sample_rate: 44100, language: null, title: null },
+    ]);
   });
 
   it("uses first value of comma-separated format_name", async () => {
