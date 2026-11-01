@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { ZipArchive } from "archiver";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { JobManager } from "../core/job-manager.js";
@@ -31,9 +32,21 @@ export function createDownloadHandler(jobManager: JobManager, storage: Storage) 
     // Create ZIP archive with fast compression (images already compressed)
     const archive = new ZipArchive({ zlib: { level: 1 } });
 
+    // An unhandled stream error would end the whole process.
+    archive.on("error", (err: Error) => {
+      request.log.error({ err, jobId }, "ZIP download failed");
+      reply.raw.destroy(err);
+    });
+
+    // file(), not append(stream): a film's frames would each hold a descriptor
+    // open from the start, and the OS limit is reached around 8,000 on Windows.
     for (const file of files) {
-      archive.append(storage.getFileStream(jobId, file.relativePath), {
-        name: file.relativePath,
+      archive.file(file.path, { name: file.relativePath });
+    }
+
+    if (await storage.fileExists(jobId, "manifest.json")) {
+      archive.file(join(storage.getJobDir(jobId), "manifest.json"), {
+        name: "manifest.json",
       });
     }
 

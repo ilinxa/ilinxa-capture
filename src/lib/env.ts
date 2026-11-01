@@ -7,7 +7,7 @@ const envSchema = z
     HOST: z.string().default("127.0.0.1"),
     NODE_ENV: z
       .enum(["development", "production", "test"])
-      .default("development"),
+      .default("production"),
 
     // Network boundary — comma-separated; "*" disables the check
     ALLOWED_HOSTS: z.string().default(""),
@@ -42,7 +42,8 @@ const envSchema = z
     MAX_VIDEO_DURATION: z.coerce.number().int().nonnegative().default(600),
     MAX_UPLOAD_SIZE: z.coerce.number().int().positive().default(524288000),
     MAX_CONCURRENT_JOBS: z.coerce.number().int().positive().default(3),
-    JOB_TIMEOUT: z.coerce.number().int().nonnegative().default(300),
+    // Upper bound is the longest delay a Node timer can hold.
+    JOB_TIMEOUT: z.coerce.number().int().nonnegative().max(2147483).default(300),
     MAX_SHEET_EDGE: z.coerce.number().int().nonnegative().default(2000),
 
     // MCP

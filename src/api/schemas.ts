@@ -271,6 +271,7 @@ export const videoDownloadResponseSchema = z.object({
     filesize: z.number().int(),
     ext: z.string(),
     download_url: z.string(),
+    file_path: z.string(),
   }),
   processing_time_ms: z.number(),
 });

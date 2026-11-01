@@ -56,6 +56,14 @@ export async function mcpHttpPlugin(
     let transport: StreamableHTTPServerTransport;
     let isNewSession = false;
 
+    // The spec's signal for a client to start over. A 400 would strand it after
+    // a restart or an idle sweep.
+    if (sessionId && !sessions.has(sessionId)) {
+      reply.raw.writeHead(404, { "Content-Type": "text/plain" });
+      reply.raw.end("Session not found");
+      return;
+    }
+
     let existingEntry: SessionEntry | undefined;
     if (sessionId && sessions.has(sessionId)) {
       existingEntry = sessions.get(sessionId)!;
@@ -100,9 +108,14 @@ export async function mcpHttpPlugin(
   app.get("/mcp", async (request, reply) => {
     reply.hijack();
     const sessionId = request.headers["mcp-session-id"] as string | undefined;
-    if (!sessionId || !sessions.has(sessionId)) {
+    if (!sessionId) {
       reply.raw.writeHead(400, { "Content-Type": "text/plain" });
-      reply.raw.end("Invalid or missing session ID");
+      reply.raw.end("Missing session ID");
+      return;
+    }
+    if (!sessions.has(sessionId)) {
+      reply.raw.writeHead(404, { "Content-Type": "text/plain" });
+      reply.raw.end("Session not found");
       return;
     }
     const entry = sessions.get(sessionId)!;

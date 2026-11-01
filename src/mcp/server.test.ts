@@ -85,6 +85,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ]),
     unlink: vi.fn().mockResolvedValue(undefined),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockResolvedValue(undefined),
     rm: vi.fn().mockResolvedValue(undefined),
   };
 });
@@ -146,6 +147,11 @@ function createMockJobManager(): JobManager {
     shutdown: vi.fn().mockResolvedValue(undefined),
     getJobDir: vi.fn().mockReturnValue("/data/jobs/cap_0000abcd"),
     reopenJob: vi.fn().mockResolvedValue(undefined),
+    runTransient: vi.fn().mockImplementation(
+      async <T>(task: (signal: AbortSignal) => Promise<T>) =>
+        task(new AbortController().signal),
+    ),
+    cancelJob: vi.fn(),
   } as unknown as JobManager;
 }
 
@@ -740,7 +746,7 @@ describe("mcpHttpPlugin session TTL sweep", () => {
     vi.useRealTimers();
   });
 
-  it("closes idle sessions after MCP_SESSION_TTL and a subsequent GET 400s", async () => {
+  it("closes idle sessions after MCP_SESSION_TTL and a subsequent GET 404s", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
     const app = Fastify();
@@ -782,7 +788,8 @@ describe("mcpHttpPlugin session TTL sweep", () => {
         },
       });
 
-      expect(staleResponse.status).toBe(400);
+      // 404 is what tells a client to start a new session.
+      expect(staleResponse.status).toBe(404);
     } finally {
       await app.close();
     }

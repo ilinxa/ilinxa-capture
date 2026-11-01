@@ -10,6 +10,8 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // The API allows this exact origin in development, so the port cannot drift.
+    strictPort: true,
     proxy: {
       "/api": { target: "http://localhost:3000", changeOrigin: true },
     },

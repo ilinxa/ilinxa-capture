@@ -6,6 +6,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...original,
     mkdir: vi.fn().mockResolvedValue(undefined),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockResolvedValue(undefined),
     readFile: vi.fn(),
     readdir: vi.fn(),
     rm: vi.fn().mockResolvedValue(undefined),
@@ -109,7 +110,7 @@ describe("JobManager", () => {
       expect(() => jobManager.getJob(jobId)).toThrow("not found");
       expect(mockRm).toHaveBeenCalledWith(
         expect.stringContaining(jobId),
-        { recursive: true, force: true },
+        expect.objectContaining({ recursive: true, force: true }),
       );
     });
 

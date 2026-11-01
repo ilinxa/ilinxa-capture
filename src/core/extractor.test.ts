@@ -59,6 +59,11 @@ describe("buildVideoFilter", () => {
     expect(buildVideoFilter(10, preset)).toMatch(/,scale=1024:-2$/);
   });
 
+  it("allows for rounded timestamps when the source rate is known", () => {
+    const preset: ResolvedPreset = { width: null, format: "png", quality: null };
+    expect(buildVideoFilter(30, preset, 1 / 30)).toContain("floor((t+0.016333");
+  });
+
   it("accepts a fractional rate", () => {
     const preset: ResolvedPreset = { width: null, format: "png", quality: null };
     expect(buildVideoFilter(0.2, preset)).toContain("floor(t*0.2+");
@@ -178,9 +183,10 @@ describe("extractFrames", () => {
 
   it("reports each frame's printed time, offset by the range start", async () => {
     mockExec.mockImplementation(async (_cmd, _args, opts) => {
-      opts?.onStdoutLine?.("frame:0    pts:0       pts_time:0.04");
+      opts?.onStdoutLine?.("frame:0    pts:40000   pts_time:0.04");
       opts?.onStdoutLine?.("capture=1");
-      opts?.onStdoutLine?.("frame:1    pts:25      pts_time:1.04");
+      // pts_time as FFmpeg 5.1 rounds it. The exact integer must win.
+      opts?.onStdoutLine?.("frame:1    pts:1041667 pts_time:1.04");
       return { stdout: "", stderr: "" };
     });
 
@@ -197,7 +203,39 @@ describe("extractFrames", () => {
       range: { start: 100, end: 110 },
     });
 
-    expect(result.frameTimes).toEqual([100.04, 101.04]);
+    expect(result.frameTimes).toEqual([100.04, 101.041667]);
+  });
+
+  it("reads only allowlisted containers, from local files only", () => {
+    const args = buildFfmpegArgs({
+      videoPath: "/tmp/video.mp4",
+      outputDir: "/output/frames",
+      fps: 1,
+      preset: { width: null, format: "png", quality: null },
+    });
+
+    const formats = args[args.indexOf("-format_whitelist") + 1]!.split(",");
+    expect(formats).toContain("mov");
+    expect(formats).toContain("matroska");
+    for (const refused of ["hls", "dash", "concat", "image2", "avisynth", "sdp"]) {
+      expect(formats).not.toContain(refused);
+    }
+    expect(args[args.indexOf("-protocol_whitelist") + 1]).toBe("file");
+    expect(args.indexOf("-format_whitelist")).toBeLessThan(args.indexOf("-i"));
+  });
+
+  it("reports no frames in a range as the caller's mistake", async () => {
+    mockExec.mockRejectedValue(new Error("encoder failed: no frames"));
+
+    await expect(
+      extractFrames({
+        videoPath: "/tmp/video.mp4",
+        outputDir: "/output/frames",
+        fps: 1,
+        preset: { width: 1024, format: "jpeg", quality: 80 },
+        range: { start: 100, end: 110 },
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
 
   it("seeks before the input for a range", () => {

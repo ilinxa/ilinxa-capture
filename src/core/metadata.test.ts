@@ -105,6 +105,34 @@ describe("getVideoMetadata", () => {
     ]);
   });
 
+  it("refuses anything outside the container allowlist before opening it", async () => {
+    mockExec.mockResolvedValue({ stdout: createFfprobeOutput(), stderr: "" });
+
+    await getVideoMetadata("/test/file.mp4");
+
+    const args = mockExec.mock.calls[0]![1];
+    expect(args.indexOf("-format_whitelist")).toBeLessThan(args.indexOf("/test/file.mp4"));
+    expect(args[args.indexOf("-protocol_whitelist") + 1]).toBe("file");
+  });
+
+  it("measures the duration when the container does not state it", async () => {
+    const stdout = JSON.stringify({
+      streams: [{ codec_type: "video", codec_name: "h264", r_frame_rate: "25/1" }],
+      format: { size: "100", format_name: "matroska,webm" },
+    });
+    mockExec.mockResolvedValueOnce({ stdout, stderr: "" });
+    mockExec.mockImplementationOnce(async (_cmd, _args, opts) => {
+      opts?.onStdoutLine?.("0.000000");
+      opts?.onStdoutLine?.("29.960000");
+      opts?.onStdoutLine?.("12.000000");
+      return { stdout: "", stderr: "" };
+    });
+
+    const metadata = await getVideoMetadata("/piped.mkv");
+
+    expect(metadata.duration).toBeCloseTo(29.96);
+  });
+
   it("uses first value of comma-separated format_name", async () => {
     const stdout = createFfprobeOutput({
       format: {
@@ -157,7 +185,7 @@ describe("getVideoMetadata", () => {
 
     expect(mockExec).toHaveBeenCalledWith(
       "ffprobe",
-      ["-v", "error", "-print_format", "json", "-show_format", "-show_streams", "/test/file.mp4"],
+      expect.arrayContaining(["-show_format", "-show_streams", "/test/file.mp4"]),
       expect.anything(),
     );
   });

@@ -298,6 +298,88 @@ describe("composeGrid", () => {
     ]);
   });
 
+  it("stops during validation when aborted", async () => {
+    const reason = new Error("timed out");
+    const controller = new AbortController();
+    const metadata = vi.fn().mockImplementation(async () => {
+      controller.abort(reason);
+      return { width: 100, height: 100, format: "jpeg" };
+    });
+    mockSharp.mockImplementation(
+      () => ({ metadata }) as unknown as ReturnType<typeof sharp>,
+    );
+
+    await expect(
+      composeGrid({
+        ...baseOpts,
+        frameFiles: Array.from({ length: 50 }, (_, i) => `/f/${i}.jpg`),
+        signal: controller.signal,
+      }),
+    ).rejects.toBe(reason);
+
+    expect(metadata.mock.calls.length).toBeLessThan(50);
+  });
+
+  it("reads a caller's frames one at a time, and its own in parallel", async () => {
+    let active = 0;
+    let peak = 0;
+    const metadata = vi.fn().mockImplementation(async () => {
+      peak = Math.max(peak, ++active);
+      await new Promise((r) => setTimeout(r, 1));
+      active -= 1;
+      return { width: 100, height: 100, format: "jpeg" };
+    });
+    const instance = {
+      metadata,
+      composite: vi.fn().mockReturnThis(),
+      jpeg: vi.fn().mockReturnThis(),
+      png: vi.fn().mockReturnThis(),
+      toFile: vi.fn().mockResolvedValue(undefined),
+      toBuffer: vi.fn().mockResolvedValue(Buffer.from("x")),
+    };
+    mockSharp.mockImplementation(
+      () => instance as unknown as ReturnType<typeof sharp>,
+    );
+    const frameFiles = Array.from({ length: 16 }, (_, i) => `/f/${i}.jpg`);
+
+    await composeGrid({ ...baseOpts, frameFiles });
+    expect(peak).toBe(1);
+
+    peak = 0;
+    await composeGrid({ ...baseOpts, frameFiles, trustedFrames: true });
+    expect(peak).toBeGreaterThan(1);
+  });
+
+  it("labels overlays with the shot number and true time", async () => {
+    const svgs: string[] = [];
+    const instance = {
+      metadata: vi.fn().mockResolvedValue({ width: 640, height: 360, format: "jpeg" }),
+      composite: vi.fn().mockImplementation(function (this: unknown, layers: Array<{ input?: Buffer }>) {
+        const input = layers[0]?.input;
+        if (Buffer.isBuffer(input) && input.includes("<svg")) svgs.push(input.toString());
+        return this;
+      }),
+      jpeg: vi.fn().mockReturnThis(),
+      png: vi.fn().mockReturnThis(),
+      toFile: vi.fn().mockResolvedValue(undefined),
+      toBuffer: vi.fn().mockResolvedValue(Buffer.from("x")),
+    };
+    mockSharp.mockImplementation(
+      () => instance as unknown as ReturnType<typeof sharp>,
+    );
+
+    await composeGrid({
+      ...baseOpts,
+      mode: 1,
+      frameFiles: ["/f/a.jpg"],
+      overlays: { frameNumber: false, timestamp: true },
+      labels: [{ time: 3723.25, shot: 12 }],
+    });
+
+    expect(svgs[0]).toContain("Shot 12");
+    expect(svgs[0]).toContain("01:02:03.250");
+  });
+
   it("stops between sheets when aborted", async () => {
     const reason = new Error("timed out");
     await expect(

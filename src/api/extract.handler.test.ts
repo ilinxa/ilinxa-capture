@@ -27,6 +27,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...original,
     mkdir: vi.fn().mockResolvedValue(undefined),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockResolvedValue(undefined),
     readdir: vi.fn().mockRejectedValue(
       Object.assign(new Error("ENOENT"), { code: "ENOENT" }),
     ),
@@ -269,7 +270,10 @@ describe("POST /api/v1/extract", () => {
     expect(body["poll_url"]).toMatch(/\/api\/v1\/jobs\/cap_/);
 
     // Wait for background task to complete
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    const asyncJob = app.jobManager.getJob(String(body["job_id"]));
+    for (let i = 0; i < 400 && asyncJob.status !== "completed"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
 
     // Poll for completion
     const pollResponse = await app.inject({

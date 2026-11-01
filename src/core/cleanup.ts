@@ -2,6 +2,7 @@ import { readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isValidJobId } from "./job-id.js";
+import { TOMBSTONE_SUFFIX, removeTree } from "./safe-fs.js";
 
 interface MinimalLogger {
   info(msg: string): void;
@@ -16,6 +17,8 @@ interface CleanupOptions {
   logger: MinimalLogger;
   /** Called after a job directory is removed, so the registry stays in step. */
   onJobRemoved?: (jobId: string) => void;
+  /** Jobs with work queued or running are left alone, whatever job.json says. */
+  isBusy?: (jobId: string) => boolean;
 }
 
 export class CleanupScheduler {
@@ -24,6 +27,7 @@ export class CleanupScheduler {
   private readonly intervalMs: number;
   private readonly logger: MinimalLogger;
   private readonly onJobRemoved: ((jobId: string) => void) | undefined;
+  private readonly isBusy: ((jobId: string) => boolean) | undefined;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: CleanupOptions) {
@@ -32,12 +36,22 @@ export class CleanupScheduler {
     this.intervalMs = opts.intervalMs ?? 60_000;
     this.logger = opts.logger;
     this.onJobRemoved = opts.onJobRemoved;
+    this.isBusy = opts.isBusy;
   }
 
   start(): void {
-    void this.sweep();
-    this.timer = setInterval(() => void this.sweep(), this.intervalMs);
+    void this.safeSweep();
+    this.timer = setInterval(() => void this.safeSweep(), this.intervalMs);
     this.timer.unref();
+  }
+
+  /** Housekeeping must never end the server: a rejection here would. */
+  private async safeSweep(): Promise<void> {
+    try {
+      await this.sweep();
+    } catch (err) {
+      this.logger.warn({ err }, "Cleanup sweep failed");
+    }
   }
 
   stop(): void {
@@ -67,8 +81,22 @@ export class CleanupScheduler {
     let cleaned = 0;
 
     for (const entry of entries) {
+      // A delete that stopped partway; finish it.
+      if (
+        entry.endsWith(TOMBSTONE_SUFFIX) &&
+        isValidJobId(entry.slice(0, -TOMBSTONE_SUFFIX.length))
+      ) {
+        await rm(join(this.outputDir, entry), {
+          recursive: true,
+          force: true,
+        }).catch(() => {
+          // Still locked; the next sweep tries again
+        });
+        continue;
+      }
+
       // Only ever touch directories named like our own jobs.
-      if (!isValidJobId(entry)) continue;
+      if (!isValidJobId(entry) || this.isBusy?.(entry)) continue;
 
       const jobJsonPath = join(this.outputDir, entry, "job.json");
 
@@ -128,7 +156,14 @@ export class CleanupScheduler {
       const terminalTime = new Date(terminalTimestamp).getTime();
       if (now - terminalTime < this.ttlMs) continue;
 
-      await rm(join(this.outputDir, entry), { recursive: true, force: true });
+      try {
+        await removeTree(join(this.outputDir, entry));
+      } catch (err) {
+        // A file in use, most likely. The job stays whole for the next sweep.
+        this.logger.warn({ jobId: entry, err }, "Could not remove expired job");
+        continue;
+      }
+
       this.onJobRemoved?.(entry);
       cleaned++;
     }

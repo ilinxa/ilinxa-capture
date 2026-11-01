@@ -1,7 +1,7 @@
 import PQueue from "p-queue";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 interface MinimalLogger {
   info(msg: string): void;
@@ -16,6 +16,7 @@ import {
   JobTimeoutError,
 } from "../utils/errors.js";
 import { assertValidJobId, JOB_ID_PATTERN } from "./job-id.js";
+import { removeTree, writeFileAtomic } from "./safe-fs.js";
 
 export type JobStatus = "pending" | "processing" | "completed" | "failed";
 export type JobType =
@@ -111,6 +112,12 @@ interface ActiveJob {
   settled: Promise<void>;
 }
 
+/** A job's standing before it was reopened, to return to if the new work fails. */
+type ReopenSnapshot = Pick<
+  JobState,
+  "type" | "status" | "completed_at" | "failed_at"
+>;
+
 interface WebhookPayload {
   event: "job.completed" | "job.failed";
   job_id: string;
@@ -124,6 +131,8 @@ interface WebhookPayload {
 export class JobManager {
   private readonly jobs: Map<string, JobState> = new Map();
   private readonly active: Map<string, ActiveJob> = new Map();
+  private readonly reopened: Map<string, ReopenSnapshot> = new Map();
+  private readonly cancelled: Set<string> = new Set();
   private readonly queue: PQueue;
   private readonly outputDir: string;
   private readonly logger: MinimalLogger;
@@ -181,6 +190,13 @@ export class JobManager {
       throw new JobBusyError(jobId);
     }
 
+    this.reopened.set(jobId, {
+      type: job.type,
+      status: job.status,
+      completed_at: job.completed_at,
+      failed_at: job.failed_at,
+    });
+
     job.type = opts.type;
     job.status = "pending";
     job.webhook_url = opts.webhookUrl ?? job.webhook_url;
@@ -215,8 +231,27 @@ export class JobManager {
       await active.settled;
     }
 
+    // Removed from the registry only once gone: a failed delete stays tracked.
+    await removeTree(this.getJobDir(jobId));
     this.jobs.delete(jobId);
-    await rm(this.getJobDir(jobId), { recursive: true, force: true });
+    this.reopened.delete(jobId);
+    this.cancelled.delete(jobId);
+  }
+
+  /** Stop a job but keep it and its output: a caller gave up waiting for it. */
+  cancelJob(jobId: string): void {
+    const active = this.active.get(jobId);
+    if (active) {
+      active.controller.abort(new JobCancelledError(jobId));
+    } else if (this.jobs.get(jobId)?.status === "pending") {
+      this.cancelled.add(jobId);
+    }
+  }
+
+  /** Whether work on this job is queued or running, so it must not be swept. */
+  isBusy(jobId: string): boolean {
+    const status = this.jobs.get(jobId)?.status;
+    return status === "pending" || status === "processing";
   }
 
   /** Drop a job whose directory is already gone, as after a cleanup sweep. */
@@ -226,17 +261,47 @@ export class JobManager {
     }
   }
 
-  async runSync<T>(jobId: string, task: TaskFunction<T>): Promise<T> {
-    this.getJob(jobId);
-    const result = await this.queue.add(() => this.execute(jobId, task));
+  /**
+   * Run work that leaves no job record, under the same limits as a job: it
+   * takes a queue slot, times out, and stops at shutdown.
+   */
+  async runTransient<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const key = `transient_${randomUUID()}`;
+
+    const result = await this.queue.add(async () => {
+      if (this.closing) throw new JobCancelledError(key);
+
+      const { controller, finish } = this.track(key);
+      try {
+        return await task(controller.signal);
+      } finally {
+        finish();
+      }
+    });
     return result as T;
   }
 
-  runAsync(jobId: string, task: TaskFunction<unknown>): void {
+  async runSync<T>(
+    jobId: string,
+    task: TaskFunction<T>,
+    onSkipped?: () => Promise<void>,
+  ): Promise<T> {
+    this.getJob(jobId);
+    const result = await this.queue.add(() =>
+      this.execute(jobId, task, onSkipped),
+    );
+    return result as T;
+  }
+
+  runAsync(
+    jobId: string,
+    task: TaskFunction<unknown>,
+    onSkipped?: () => Promise<void>,
+  ): void {
     this.queue
       .add(async () => {
         try {
-          await this.execute(jobId, task);
+          await this.execute(jobId, task, onSkipped);
         } catch {
           // Already recorded on the job. Nothing is waiting for this promise.
         }
@@ -255,26 +320,27 @@ export class JobManager {
    * settled, which `execFileAsync` only does once its process is gone, so
    * MAX_CONCURRENT_JOBS stays true after a timeout.
    */
-  private async execute<T>(jobId: string, task: TaskFunction<T>): Promise<T> {
+  private async execute<T>(
+    jobId: string,
+    task: TaskFunction<T>,
+    onSkipped?: () => Promise<void>,
+  ): Promise<T> {
     const job = this.jobs.get(jobId);
-    if (!job || this.closing) {
-      throw new JobCancelledError(jobId); // Deleted or shut down while queued
+    if (!job || this.closing || this.cancelled.has(jobId)) {
+      // Deleted, cancelled or shut down while queued
+      await onSkipped?.().catch(() => {});
+      if (job && this.cancelled.delete(jobId)) {
+        job.status = "failed";
+        job.failed_at = new Date().toISOString();
+        job.error = new JobCancelledError(jobId).message;
+        job.error_code = "JOB_CANCELLED";
+        await this.persistJob(job);
+      }
+      throw new JobCancelledError(jobId);
     }
 
-    const controller = new AbortController();
-    let markSettled: () => void = () => {};
-    const settled = new Promise<void>((done) => {
-      markSettled = done;
-    });
-    this.active.set(jobId, { controller, settled });
-
-    const timer =
-      this.timeoutSeconds > 0
-        ? setTimeout(
-            () => controller.abort(new JobTimeoutError(String(this.timeoutSeconds))),
-            this.timeoutSeconds * 1000,
-          )
-        : null;
+    const { controller, finish } = this.track(jobId);
+    const snapshot = this.reopened.get(jobId);
 
     const startTime = Date.now();
     try {
@@ -306,19 +372,59 @@ export class JobManager {
         ? controller.signal.reason
         : err;
 
-      job.status = "failed";
-      job.failed_at = new Date().toISOString();
       job.error = failure instanceof Error ? failure.message : String(failure);
       job.error_code = errorCode(failure);
       job.processing_time_ms = Date.now() - startTime;
       job.progress = null;
+
+      // Failed extra work must not cost the job what it already had. The error
+      // stays on the record, but the output remains reachable.
+      if (snapshot) {
+        job.type = snapshot.type;
+        job.status = snapshot.status;
+        job.completed_at = snapshot.completed_at;
+        job.failed_at = snapshot.failed_at;
+      } else {
+        job.status = "failed";
+        job.failed_at = new Date().toISOString();
+      }
+
       await this.persistIfTracked(job);
       throw failure;
     } finally {
-      if (timer) clearTimeout(timer);
-      this.active.delete(jobId);
-      markSettled();
+      this.reopened.delete(jobId);
+      finish();
     }
+  }
+
+  /** Register running work: its abort controller, timeout and settled promise. */
+  private track(key: string): { controller: AbortController; finish: () => void } {
+    const controller = new AbortController();
+    let markSettled: () => void = () => {};
+    const settled = new Promise<void>((done) => {
+      markSettled = done;
+    });
+    this.active.set(key, { controller, settled });
+
+    const timer =
+      this.timeoutSeconds > 0
+        ? setTimeout(
+            () => controller.abort(new JobTimeoutError(String(this.timeoutSeconds))),
+            this.timeoutSeconds * 1000,
+          )
+        : null;
+
+    return {
+      controller,
+      finish: () => {
+        if (timer) clearTimeout(timer);
+        // A reopen can start new work before the old run gets here.
+        if (this.active.get(key)?.controller === controller) {
+          this.active.delete(key);
+        }
+        markSettled();
+      },
+    };
   }
 
   async recover(): Promise<void> {
@@ -354,9 +460,15 @@ export class JobManager {
 
         // Mark stuck jobs as failed
         if (job.status === "processing" || job.status === "pending") {
-          job.status = "failed";
-          job.failed_at = new Date().toISOString();
           job.error = "Server restarted during processing";
+          // A job with a result was reopened: its earlier output is still good.
+          if (job.result !== null) {
+            job.status = "completed";
+            job.completed_at = new Date().toISOString();
+          } else {
+            job.status = "failed";
+            job.failed_at = new Date().toISOString();
+          }
           await this.persistJob(job);
         }
 
@@ -395,17 +507,17 @@ export class JobManager {
   private async persistJob(job: JobState): Promise<void> {
     const jobDir = this.getJobDir(job.id);
     await mkdir(jobDir, { recursive: true });
-    await writeFile(
-      join(jobDir, "job.json"),
-      JSON.stringify(job, null, 2),
-    );
+    await writeFileAtomic(join(jobDir, "job.json"), JSON.stringify(job, null, 2));
   }
 
   private async fireWebhook(job: JobState): Promise<void> {
     if (!job.webhook_url) return;
 
     const payload: WebhookPayload = {
-      event: job.status === "completed" ? "job.completed" : "job.failed",
+      event:
+        job.status === "completed" && job.error === null
+          ? "job.completed"
+          : "job.failed",
       job_id: job.id,
       status: job.status,
       result: job.result,

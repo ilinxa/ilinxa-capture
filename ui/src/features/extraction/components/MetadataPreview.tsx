@@ -31,8 +31,8 @@ export function MetadataPreview({ metadata }: MetadataPreviewProps) {
         {isTooLong && (
           <div className="mb-3 flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
             <AlertTriangle className="h-4 w-4 shrink-0" />
-            Video exceeds the 10-minute limit ({formatDuration(metadata.duration)}). Extraction will
-            fail.
+            This video runs {formatDuration(metadata.duration)}, past the default 10-minute limit.
+            The server may refuse it unless MAX_VIDEO_DURATION was raised.
           </div>
         )}
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">

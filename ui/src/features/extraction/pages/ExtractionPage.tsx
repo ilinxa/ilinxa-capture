@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { useJobPolling } from "@/hooks/useJobPolling";
-import { MAX_VIDEO_DURATION_SECONDS } from "@/lib/constants";
 import { jobKeys } from "@/lib/query-keys";
 import { useWorkflowActions } from "@/stores/workflowStore";
 import { type ExtractResponse, type JobPollFailed, type JobPollResponse } from "@/types/api";
@@ -44,7 +43,6 @@ export function ExtractionPage() {
 
   // Derived state
   const hasSource = sourceType === "file" ? file !== null : url.trim().length > 0;
-  const isTooLong = (metadataMutation.data?.duration ?? 0) > MAX_VIDEO_DURATION_SECONDS;
   const pollStatus = pendingJobId ? (jobPoll.data?.status ?? null) : null;
   const isExtracting =
     extractMutation.isPending ||
@@ -160,7 +158,7 @@ export function ExtractionPage() {
         <div className="flex items-center gap-4">
           <Button
             onClick={handleExtract}
-            disabled={!hasSource || isTooLong || isExtracting}
+            disabled={!hasSource || isExtracting}
             size="lg"
           >
             {isExtracting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

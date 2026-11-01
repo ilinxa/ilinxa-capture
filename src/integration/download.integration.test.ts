@@ -79,9 +79,10 @@ describe.skipIf(!hasYtDlp())("URL sources (real yt-dlp)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       job_id: string;
-      video: { download_url: string; filesize: number };
+      video: { download_url: string; filesize: number; file_path: string };
     };
     expect(body.video.filesize).toBeGreaterThan(1000);
+    expect(body.video.file_path).toContain(body.job_id);
 
     const file = await fetch(`${server.baseUrl}${body.video.download_url}`);
     expect(file.status).toBe(200);
@@ -116,6 +117,27 @@ describe.skipIf(!hasYtDlp())("URL sources (real yt-dlp)", () => {
     });
     expect(res.status).toBe(400);
   });
+
+  // Regression: a URL probe is a full download, but ran outside every limit.
+  it("holds URL probes to the job limits", async () => {
+    const limited = await startServer({
+      LOCAL_OUTPUT_DIR: join(dir, "probe"),
+      JOB_TIMEOUT: 1,
+      MAX_CONCURRENT_JOBS: 1,
+    });
+    try {
+      const started = Date.now();
+      const responses = await Promise.all(
+        [1, 2].map(() => limited.post("/api/v1/metadata", { source: slowUrl })),
+      );
+
+      expect(responses.map((r) => r.status)).toEqual([504, 504]);
+      // One at a time, each for its full second.
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1900);
+    } finally {
+      await limited.close();
+    }
+  }, 30_000);
 
   // Regression: downloads ran outside the job, so nothing could stop them.
   it("stops a stuck download at the job timeout", async () => {

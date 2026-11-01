@@ -117,6 +117,30 @@ describe("execFileAsync", () => {
     expect(await waitForExit(grandchild)).toBe(true);
   });
 
+  // Regression: a descendant outside the process group holds stdout open, so
+  // `close` never fires, and a job could never finish being cancelled.
+  it("stops waiting for a descendant that escaped and holds the pipes", async () => {
+    const parent = `
+      const { spawn } = require("node:child_process");
+      spawn(process.execPath, ["-e", "setTimeout(() => {}, 12000)"], {
+        detached: true,
+        stdio: ["ignore", "inherit", "inherit"],
+      }).unref();
+      console.log("ready");
+      setInterval(() => {}, 1000);
+    `;
+    const controller = new AbortController();
+    const started = Date.now();
+
+    const run = execFileAsync(node, ["-e", parent], {
+      signal: controller.signal,
+      onStdoutLine: () => controller.abort(new Error("stop")),
+    });
+
+    await expect(run).rejects.toThrow("stop");
+    expect(Date.now() - started).toBeLessThan(10_000);
+  }, 15_000);
+
   it("rejects immediately when the signal is already aborted", async () => {
     const reason = new Error("already gone");
     await expect(

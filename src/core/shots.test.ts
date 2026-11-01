@@ -6,7 +6,7 @@ const span = { start: 0, end: 10 };
 describe("buildShots", () => {
   it("returns one shot when there are no cuts", () => {
     expect(buildShots([], span, 0.25)).toEqual([
-      { index: 1, start: 0, end: 10, duration: 10 },
+      { index: 1, start: 0, end: 10, duration: 10, lastFrame: 10 },
     ]);
   });
 
@@ -54,20 +54,40 @@ describe("buildShots", () => {
     expect(shots).toHaveLength(1);
   });
 
+  it("records each shot's real final frame from the decode", () => {
+    const shots = buildShots([4], span, 0.25, {
+      frameBeforeCut: new Map([[4, 2.958]]),
+      lastFrame: 9.96,
+    });
+    expect(shots.map((s) => s.lastFrame)).toEqual([2.958, 9.96]);
+  });
+
+  it("keeps the frame before a cut that survived, not one that was ignored", () => {
+    const shots = buildShots([2, 2.1, 5], span, 0.25, {
+      frameBeforeCut: new Map([
+        [2, 1.96],
+        [2.1, 2.06],
+        [5, 4.96],
+      ]),
+      lastFrame: 9.96,
+    });
+    expect(shots[1]?.lastFrame).toBe(4.96);
+  });
+
   it("sorts cuts that arrive out of order", () => {
     expect(buildShots([5, 2], span, 0.25).map((s) => s.start)).toEqual([0, 2, 5]);
   });
 });
 
 describe("planShotFrames", () => {
-  const shot: Shot = { index: 3, start: 10, end: 14, duration: 4 };
+  const shot: Shot = { index: 3, start: 10, end: 14, duration: 4, lastFrame: 13.96 };
 
   it("places first, middle and last inside the shot", () => {
     const targets = planShotFrames([shot], ["first", "middle", "last"], 0.04);
     expect(targets).toEqual([
-      { shot: 3, position: "first", time: 10 },
-      { shot: 3, position: "middle", time: 12 },
-      { shot: 3, position: "last", time: 13.96 },
+      { shot: 3, position: "first", time: 10, latest: 13.96 },
+      { shot: 3, position: "middle", time: 12, latest: 13.96 },
+      { shot: 3, position: "last", time: 13.96, latest: 13.96 },
     ]);
   });
 
@@ -77,7 +97,7 @@ describe("planShotFrames", () => {
   });
 
   it("does not capture the same frame twice in a very short shot", () => {
-    const tiny: Shot = { index: 1, start: 5, end: 5.04, duration: 0.04 };
+    const tiny: Shot = { index: 1, start: 5, end: 5.04, duration: 0.04, lastFrame: 5 };
     const targets = planShotFrames([tiny], ["first", "middle", "last"], 0.04);
     expect(targets).toHaveLength(1);
     expect(targets[0]?.position).toBe("first");
@@ -85,10 +105,16 @@ describe("planShotFrames", () => {
 
   it("covers every shot", () => {
     const shots: Shot[] = [
-      { index: 1, start: 0, end: 2, duration: 2 },
-      { index: 2, start: 2, end: 4, duration: 2 },
+      { index: 1, start: 0, end: 2, duration: 2, lastFrame: 1.96 },
+      { index: 2, start: 2, end: 4, duration: 2, lastFrame: 3.96 },
     ];
     expect(planShotFrames(shots, ["middle"], 0.04).map((t) => t.time)).toEqual([1, 3]);
+  });
+
+  it("takes the real last frame on variable rate video, not end minus a frame", () => {
+    const vfr: Shot = { index: 1, start: 0, end: 4, duration: 4, lastFrame: 2.958 };
+    const [target] = planShotFrames([vfr], ["last"], 0.04);
+    expect(target?.time).toBe(2.958);
   });
 
   it("plans nothing with no positions", () => {

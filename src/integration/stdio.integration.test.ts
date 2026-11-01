@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { access, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -10,8 +11,7 @@ const REPO = resolve(import.meta.dirname, "..", "..");
 
 /**
  * The real stdio server as an MCP client starts it: its own process, in an
- * arbitrary working directory, speaking JSON-RPC over stdin and stdout. A stray
- * write to stdout would break the client's parser and fail these tests.
+ * arbitrary working directory, speaking JSON-RPC over stdin and stdout.
  */
 describe("MCP over stdio (real process)", () => {
   let dir: string;
@@ -164,6 +164,89 @@ describe("MCP over stdio (real process)", () => {
     expect(seen.some((m) => m.startsWith("extracting"))).toBe(true);
   });
 
+  it("sends no progress after an async response", async () => {
+    const seen: string[] = [];
+    const result = (await client.callTool(
+      { name: "capture_extract", arguments: { source: clip, fps: 10, async: true } },
+      undefined,
+      {
+        onprogress: (progress) => {
+          if (progress.message) seen.push(progress.message);
+        },
+      },
+    )) as ToolResult;
+
+    const { job_id: jobId } = JSON.parse(result.content[0]!.text) as { job_id: string };
+    await waitForJob(jobId);
+    expect(seen).toEqual([]);
+  });
+
+  it("shows progress in status while a job runs", async () => {
+    const slow = join(dir, "slow.mp4");
+    await makeClip(slow, { seconds: 60, size: "1280x720", rate: 30 });
+
+    const { job_id: jobId } = await call<{ job_id: string }>("capture_extract", {
+      source: slow,
+      fps: 30,
+      preset: "high",
+      async: true,
+    });
+
+    let progress: { stage: string; percent: number | null } | null = null;
+    for (let i = 0; i < 400 && progress === null; i++) {
+      const job = await call<{ progress: typeof progress }>("capture_job_status", {
+        job_id: jobId,
+      });
+      progress = job.progress;
+    }
+
+    expect(progress).toMatchObject({ stage: "extracting" });
+    await call("capture_job_delete", { job_id: jobId });
+  });
+
+  // Regression: a client's timeout left a hidden job holding a slot, with no ID
+  // for anyone to stop it by.
+  it("stops a sync job when the client cancels the call", async () => {
+    const slow = join(dir, "cancel.mp4");
+    await makeClip(slow, { seconds: 60, size: "1280x720", rate: 30 });
+
+    const controller = new AbortController();
+    const started = client
+      .callTool(
+        { name: "capture_extract", arguments: { source: slow, fps: 30, preset: "high" } },
+        undefined,
+        { signal: controller.signal },
+      )
+      .catch((err: unknown) => err);
+
+    const jobsDir = join(home, ".ilinxa-capture", "jobs");
+    const before = new Set(await readdir(jobsDir));
+    let jobId: string | undefined;
+    for (let i = 0; i < 200 && !jobId; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+      jobId = (await readdir(jobsDir)).find(
+        (entry) => !before.has(entry) && entry.startsWith("cap_"),
+      );
+    }
+    expect(jobId).toBeDefined();
+
+    await new Promise((r) => setTimeout(r, 300));
+    controller.abort();
+    await started;
+
+    let status = "";
+    for (let i = 0; i < 200 && status !== "failed"; i++) {
+      const job = await call<{ status: string; error_code: string | null }>(
+        "capture_job_status",
+        { job_id: jobId },
+      );
+      status = job.status;
+      if (status === "failed") expect(job.error_code).toBe("JOB_CANCELLED");
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(status).toBe("failed");
+  }, 60_000);
+
   it("keeps output small on a big job, and pages the rest from the manifest", async () => {
     const result = await client.callTool({
       name: "capture_extract",
@@ -257,9 +340,69 @@ describe("MCP over stdio (real process)", () => {
     ).toContain("not a readable image");
   });
 
-  it("exits when the client goes away", async () => {
+  // The SDK client hides unparseable lines, so this reads the raw stream.
+  it("writes nothing but JSON-RPC to stdout", async () => {
+    const child = spawn(
+      process.execPath,
+      [join(REPO, "node_modules", "tsx", "dist", "cli.mjs"), join(REPO, "src", "mcp-entry.ts")],
+      {
+        cwd,
+        env: {
+          ...process.env,
+          HOME: home,
+          USERPROFILE: home,
+          LOG_LEVEL: "trace",
+        },
+        stdio: ["pipe", "pipe", "ignore"],
+      },
+    );
+
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => (stdout += chunk.toString()));
+
+    const send = (message: unknown): void => {
+      child.stdin.write(`${JSON.stringify(message)}\n`);
+    };
+
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "raw", version: "0" },
+      },
+    });
+    send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "capture_metadata", arguments: { source: clip } },
+    });
+
+    for (let i = 0; i < 600 && !stdout.includes('"id":3'); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    child.stdin.end();
+
+    const lines = stdout.split("\n").filter(Boolean);
+    expect(lines.length).toBeGreaterThanOrEqual(3);
+    for (const line of lines) {
+      expect((JSON.parse(line) as { jsonrpc: string }).jsonrpc).toBe("2.0");
+    }
+  }, 60_000);
+
+  // Regression: with the client gone, a job kept running for nobody.
+  it("exits when the client goes away, stopping any running job", async () => {
     const pid = transport.pid;
     expect(pid).toBeTruthy();
+
+    const slow = join(dir, "orphan.mp4");
+    await makeClip(slow, { seconds: 60, size: "1280x720", rate: 30 });
+    await call("capture_extract", { source: slow, fps: 30, preset: "high", async: true });
 
     await client.close();
 

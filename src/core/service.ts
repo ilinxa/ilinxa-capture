@@ -1,13 +1,12 @@
-import { readdir, rm, unlink } from "node:fs/promises";
+import { readdir, rename, rm, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import type { Env } from "../lib/env.js";
 import {
   JobBusyError,
-  UnsupportedFormatError,
   ValidationError,
   VideoTooLongError,
 } from "../utils/errors.js";
-import { extractAudio } from "./audio.js";
+import { MAX_SAMPLE_RATE, extractAudio } from "./audio.js";
 import { buildFileUrls } from "./file-urls.js";
 import { composeGrid, type FrameLabel } from "./composer.js";
 import {
@@ -46,12 +45,7 @@ import type {
 } from "./options.js";
 import { resolvePreset, type PresetName, type ResolvedPreset } from "./presets.js";
 import { detectShots, extractShotFrames, planShotFrames } from "./shots.js";
-import { resolveRange } from "./timecode.js";
-
-// Readable as "video" by FFmpeg, but they pull in other files or streams.
-const INDIRECT_FORMATS = new Set(["hls", "applehttp", "concat", "lavfi", "tty"]);
-
-const PROBE_TIMEOUT_MS = 10 * 60 * 1000;
+import { parseTimecode, resolveRange } from "./timecode.js";
 
 export type SourceInput =
   | { kind: "local"; path: string }
@@ -62,6 +56,8 @@ export interface RunOptions {
   async?: boolean | undefined;
   webhookUrl?: string | undefined;
   onProgress?: ((progress: JobProgress) => void) | undefined;
+  /** Aborting stops the job. For a sync caller that has gone away. */
+  signal?: AbortSignal | undefined;
 }
 
 export type Submission<T> =
@@ -179,6 +175,8 @@ export function resolveFps(options: {
   throw new ValidationError("Provide 'fps' or 'every_seconds'");
 }
 
+const PROBE_TIMEOUT_MS = 10 * 60 * 1000;
+
 function roundTime(seconds: number): number {
   return Math.round(seconds * 1_000_000) / 1_000_000;
 }
@@ -230,29 +228,26 @@ export class CaptureService {
     return { kind: "local", path: await this.policy.resolve(source) };
   }
 
-  /** Metadata for a path or URL. Outside the queue: it is short and read-only. */
+  /** Metadata for a path or URL. A URL is a full download, so it queues like a job. */
   async probe(source: string): Promise<VideoMetadata> {
-    const signal = AbortSignal.timeout(PROBE_TIMEOUT_MS);
     const input = await this.resolveSource(source);
+    if (input.kind !== "url") return this.probeFile(input.path);
 
-    if (input.kind === "url") {
+    return this.jobs.runTransient(async (signal) => {
       const path = await downloadVideo(input.url, { signal });
       try {
-        return checkInput(await getVideoMetadata(path, { signal }));
+        return await getVideoMetadata(path, { signal });
       } finally {
         await unlink(path).catch(() => {
           // Temp file cleanup is best-effort
         });
       }
-    }
-
-    return checkInput(await getVideoMetadata(input.path, { signal }));
+    });
   }
 
   /** Metadata for a file this server already holds, such as an upload. */
   async probeFile(path: string): Promise<VideoMetadata> {
-    const signal = AbortSignal.timeout(PROBE_TIMEOUT_MS);
-    return checkInput(await getVideoMetadata(path, { signal }));
+    return getVideoMetadata(path, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
   }
 
   async extract(
@@ -260,10 +255,14 @@ export class CaptureService {
     options: ExtractOptions,
     run: RunOptions = {},
   ): Promise<Submission<ExtractResult>> {
+    checkTimes(options);
     const fps = resolveFps(options);
     const preset = resolvePreset(options.preset, options);
 
-    return this.submit("extract", run, (ctx, jobId) =>
+    return this.submit(
+      "extract",
+      run,
+      (ctx, jobId) =>
       this.withSource(source, options, ctx, run, async (path, metadata, range) => {
         const startTime = Date.now();
         const frames = await this.extractStage(
@@ -295,6 +294,7 @@ export class CaptureService {
           processing_time_ms: Date.now() - startTime,
         };
       }),
+      source,
     );
   }
 
@@ -303,10 +303,15 @@ export class CaptureService {
     options: CombinedOptions,
     run: RunOptions = {},
   ): Promise<Submission<CombinedResult>> {
+    checkTimes(options);
+    checkSheetEdge(options);
     const fps = resolveFps(options);
     const preset = resolvePreset(options.preset, options);
 
-    return this.submit("combined", run, (ctx, jobId) =>
+    return this.submit(
+      "combined",
+      run,
+      (ctx, jobId) =>
       this.withSource(source, options, ctx, run, async (path, metadata, range) => {
         const startTime = Date.now();
         const frames = await this.extractStage(
@@ -350,6 +355,7 @@ export class CaptureService {
           processing_time_ms: Date.now() - startTime,
         };
       }),
+      source,
     );
   }
 
@@ -358,9 +364,13 @@ export class CaptureService {
     options: ShotsOptions,
     run: RunOptions = {},
   ): Promise<Submission<ShotsResult>> {
+    checkTimes(options);
     const preset = resolvePreset(options.preset, options);
 
-    return this.submit("shots", run, (ctx, jobId) =>
+    return this.submit(
+      "shots",
+      run,
+      (ctx, jobId) =>
       this.withSource(source, options, ctx, run, async (path, metadata, range) => {
         const startTime = Date.now();
         const span = range ?? { start: 0, end: metadata.duration };
@@ -434,6 +444,7 @@ export class CaptureService {
           processing_time_ms: Date.now() - startTime,
         };
       }),
+      source,
     );
   }
 
@@ -442,7 +453,18 @@ export class CaptureService {
     options: AudioOptions,
     run: RunOptions = {},
   ): Promise<Submission<AudioResult>> {
-    return this.submit("audio", run, (ctx, jobId) =>
+    checkTimes(options);
+    const maxRate = MAX_SAMPLE_RATE[options.format];
+    if (maxRate && options.sample_rate && options.sample_rate > maxRate) {
+      throw new ValidationError(
+        `${options.format} supports sample rates up to ${maxRate} Hz`,
+      );
+    }
+
+    return this.submit(
+      "audio",
+      run,
+      (ctx, jobId) =>
       this.withSource(source, options, ctx, run, async (path, metadata, range) => {
         const startTime = Date.now();
 
@@ -478,9 +500,9 @@ export class CaptureService {
             url: `/api/v1/files/${jobId}/audio/${basename(audio.file)}`,
             format: options.format,
             stream: options.stream,
-            sample_rate: options.sample_rate ?? stream.sample_rate,
-            channels: options.channels ?? stream.channels,
-            duration: roundTime(duration),
+            sample_rate: audio.sampleRate,
+            channels: audio.channels,
+            duration: roundTime(audio.duration),
             size_bytes: audio.sizeBytes,
           },
           timeline_offset: range?.start ?? 0,
@@ -489,6 +511,7 @@ export class CaptureService {
           processing_time_ms: Date.now() - startTime,
         };
       }),
+      source,
     );
   }
 
@@ -498,6 +521,7 @@ export class CaptureService {
   ): Promise<Submission<ComposeResult>> {
     const { job_id: inputJobId, frames: inputFrames, timestamps, fps } = options;
 
+    checkSheetEdge(options);
     if (inputJobId && inputFrames) {
       throw new ValidationError("Provide either 'job_id' or 'frames', not both");
     }
@@ -524,10 +548,6 @@ export class CaptureService {
       const previous = (job.result ?? {}) as Record<string, unknown>;
       return this.run(inputJobId, run, async (ctx) => {
         const startTime = Date.now();
-        await rm(join(this.jobs.getJobDir(inputJobId), "sheets"), {
-          recursive: true,
-          force: true,
-        });
 
         const sheets = await this.composeStage(
           inputJobId,
@@ -571,7 +591,8 @@ export class CaptureService {
         fps ?? 1,
         this.sheetEdge(options.max_sheet_edge, null),
         options,
-        null,
+        // No frames of its own, but still a record of what each sheet holds.
+        { version: 1, preset: null, fps: fps ?? null, range: null, frames: [] },
         ctx,
         run,
       );
@@ -634,26 +655,41 @@ export class CaptureService {
     type: JobType,
     run: RunOptions,
     task: (ctx: JobContext, jobId: string) => Promise<T>,
+    source?: SourceInput,
   ): Promise<Submission<T>> {
     const jobId = this.jobs.generateJobId();
     await this.jobs.createJob(jobId, { type, webhookUrl: run.webhookUrl });
-    return this.run(jobId, run, (ctx) => task(ctx, jobId));
+
+    // Only the task removes an upload, so a job that never runs must do it here.
+    const onSkipped =
+      source?.kind === "upload"
+        ? () => unlink(source.path).catch(() => {})
+        : undefined;
+    return this.run(jobId, run, (ctx) => task(ctx, jobId), onSkipped);
   }
 
   private async run<T>(
     jobId: string,
     run: RunOptions,
     task: TaskFunction<T>,
+    onSkipped?: () => Promise<void>,
   ): Promise<Submission<T>> {
     if (run.async) {
-      this.jobs.runAsync(jobId, task);
+      this.jobs.runAsync(jobId, task, onSkipped);
       return { status: "accepted", jobId };
     }
-    return {
-      status: "completed",
-      jobId,
-      result: await this.jobs.runSync(jobId, task),
-    };
+
+    const cancel = (): void => this.jobs.cancelJob(jobId);
+    run.signal?.addEventListener("abort", cancel, { once: true });
+    try {
+      return {
+        status: "completed",
+        jobId,
+        result: await this.jobs.runSync(jobId, task, onSkipped),
+      };
+    } finally {
+      run.signal?.removeEventListener("abort", cancel);
+    }
   }
 
   /** Make the source a local file, check it, run the work, drop any temp file. */
@@ -680,9 +716,7 @@ export class CaptureService {
         path = source.path;
       }
 
-      const metadata = checkInput(
-        await getVideoMetadata(path, { signal: ctx.signal }),
-      );
+      const metadata = await getVideoMetadata(path, { signal: ctx.signal });
       const range = resolveRange(times.start, times.end, metadata.duration);
 
       // The limit is on the work to do, so a scene from a long film is fine.
@@ -719,6 +753,7 @@ export class CaptureService {
       preset,
       range,
       durationSeconds: range ? range.end - range.start : metadata.duration,
+      frameInterval: metadata.fps > 0 ? 1 / metadata.fps : 0,
       signal: ctx.signal,
       onProgress: (percent) =>
         report(ctx, run, { stage: "extracting", percent: Math.floor(percent) }),
@@ -747,9 +782,14 @@ export class CaptureService {
     ctx: JobContext,
     run: RunOptions,
   ): Promise<SheetSet> {
+    // Built aside and swapped in, so a failed compose leaves earlier sheets alone.
+    const sheetsDir = join(this.jobs.getJobDir(jobId), "sheets");
+    const buildDir = `${sheetsDir}.tmp`;
+    await rm(buildDir, { recursive: true, force: true });
+
     const result = await composeGrid({
       frameFiles,
-      outputDir: join(this.jobs.getJobDir(jobId), "sheets"),
+      outputDir: buildDir,
       mode: options.mode as 1 | 4 | 16,
       overlays: {
         frameNumber: options.overlay_frame_number,
@@ -758,10 +798,20 @@ export class CaptureService {
       fps,
       labels,
       maxSheetEdge,
+      trustedFrames: manifest !== null && manifest.frames.length > 0,
       signal: ctx.signal,
       onProgress: (percent) =>
         report(ctx, run, { stage: "composing", percent: Math.floor(percent) }),
+    }).catch(async (err: unknown) => {
+      await rm(buildDir, { recursive: true, force: true }).catch(() => {});
+      throw err;
     });
+
+    await rm(sheetsDir, { recursive: true, force: true });
+    await rename(buildDir, sheetsDir);
+    const sheetFiles = result.sheetFiles.map((file) =>
+      join(sheetsDir, basename(file)),
+    );
 
     if (manifest) {
       await writeManifest(this.jobs.getJobDir(jobId), {
@@ -774,8 +824,8 @@ export class CaptureService {
       count: result.sheetCount,
       mode: result.mode,
       grid: result.grid,
-      files: result.sheetFiles,
-      urls: buildFileUrls(jobId, result.sheetFiles),
+      files: sheetFiles,
+      urls: buildFileUrls(jobId, sheetFiles),
     };
   }
 
@@ -823,16 +873,28 @@ export class CaptureService {
   }
 }
 
+/** Bad times are checkable now, so they should not wait for a download. */
+function checkTimes(times: {
+  start?: number | string | undefined;
+  end?: number | string | undefined;
+}): void {
+  if (times.start !== undefined) parseTimecode(times.start);
+  if (times.end !== undefined) parseTimecode(times.end);
+}
+
+function checkSheetEdge(options: {
+  mode: number;
+  max_sheet_edge?: number | undefined;
+}): void {
+  if (options.mode === 1 && options.max_sheet_edge !== undefined) {
+    throw new ValidationError(
+      "'max_sheet_edge' applies to grid sheets, so it needs mode 4 or 16",
+    );
+  }
+}
+
 function report(ctx: JobContext, run: RunOptions, progress: JobProgress): void {
   ctx.reportProgress(progress);
   run.onProgress?.(progress);
 }
 
-function checkInput(metadata: VideoMetadata): VideoMetadata {
-  if (INDIRECT_FORMATS.has(metadata.format)) {
-    throw new UnsupportedFormatError(
-      `'${metadata.format}' files are not accepted as a video source`,
-    );
-  }
-  return metadata;
-}

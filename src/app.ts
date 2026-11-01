@@ -41,6 +41,8 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   const fastifyOpts: FastifyServerOptions = {
     logger: opts.logger === false ? false : createLoggerOptions(opts.env),
     genReqId: () => randomUUID(),
+    // Frame lists for compose run to hundreds of bytes per frame of a film.
+    bodyLimit: 32 * 1024 * 1024,
     requestIdLogLabel: "reqId",
   };
 

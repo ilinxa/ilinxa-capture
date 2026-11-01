@@ -1,6 +1,7 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { writeFileAtomic } from "./safe-fs.js";
 
 const manifestFrameSchema = z.object({
   index: z.number().int().nonnegative(),
@@ -53,7 +54,7 @@ export async function writeManifest(
   jobDir: string,
   manifest: Manifest,
 ): Promise<void> {
-  await writeFile(manifestPath(jobDir), JSON.stringify(manifest, null, 2));
+  await writeFileAtomic(manifestPath(jobDir), JSON.stringify(manifest, null, 2));
 }
 
 /** Null when absent or unreadable, as for jobs made before manifests existed. */

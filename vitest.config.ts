@@ -6,6 +6,8 @@ export default defineConfig({
     environment: "node",
     include: ["src/**/*.test.ts"],
     exclude: ["src/**/*.integration.test.ts"],
+    // Generous for the first test in a file, which pays for loading the app.
+    testTimeout: 30_000,
     coverage: {
       provider: "v8",
       reporter: ["text", "json", "html"],

@@ -1,11 +1,13 @@
 import { mkdir } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
-import { ProcessingError } from "../utils/errors.js";
+import { ProcessingError, ValidationError } from "../utils/errors.js";
 import {
+  EXACT_TIMEBASE_FILTER,
+  MEDIA_INPUT_OPTIONS,
   PRINT_PTS_FILTER,
+  mediaInputArgs,
   parsePtsLine,
-  rangeInputArgs,
   runFfmpeg,
   type TimeRange,
 } from "./ffmpeg.js";
@@ -19,9 +21,11 @@ const MAX_FRAME_WORKERS = 4;
 // Small enough for scene scoring to be fast; large enough to keep the cuts.
 const DETECT_WIDTH = 320;
 
-// Times from metadata=print are rounded, so seek a hair early to land on the
-// wanted frame rather than the one after it. Far less than one frame even at 240 fps.
+// Times are whole microseconds, so seek a hair early to land on the wanted frame
+// rather than the one after it. Far less than one frame even at 240 fps.
 const SEEK_LEAD_SECONDS = 0.0005;
+
+const SCENE_SCORE_LINE = /^lavfi\.scene_score=([\d.]+)/;
 
 export interface Shot {
   /** 1-based, as a shot list reads. */
@@ -29,6 +33,15 @@ export interface Shot {
   start: number;
   end: number;
   duration: number;
+  /** Time of the shot's own final frame. */
+  lastFrame: number;
+}
+
+/** What the decode saw, in seconds. */
+export interface DecodedTimeline {
+  /** A shot's end is the time of the cut; this gives the frame before each. */
+  frameBeforeCut: Map<number, number>;
+  lastFrame: number;
 }
 
 export interface DetectShotsOptions {
@@ -51,6 +64,7 @@ export function buildShots(
   cuts: number[],
   span: TimeRange,
   minShotSeconds: number,
+  timeline?: DecodedTimeline,
 ): Shot[] {
   const boundaries = [span.start];
 
@@ -67,8 +81,13 @@ export function buildShots(
   }
 
   return boundaries.map((start, i) => {
-    const end = boundaries[i + 1] ?? span.end;
-    return { index: i + 1, start, end, duration: end - start };
+    const next = boundaries[i + 1];
+    const end = next ?? span.end;
+    const lastFrame =
+      next === undefined
+        ? (timeline?.lastFrame ?? end)
+        : (timeline?.frameBeforeCut.get(next) ?? next);
+    return { index: i + 1, start, end, duration: end - start, lastFrame };
   });
 }
 
@@ -76,18 +95,24 @@ export function buildShots(
 export async function detectShots(opts: DetectShotsOptions): Promise<Shot[]> {
   const offset = opts.range?.start ?? 0;
   const cuts: number[] = [];
+  const frameBeforeCut = new Map<number, number>();
+  let previous: number | null = null;
+  let current: number | null = null;
 
+  // Every frame passes and is scored, rather than selecting only the cuts: the
+  // container's duration is not where the video ends (audio can run on), and a
+  // variable frame rate leaves no way to compute the frame before a cut.
   const filter = [
+    EXACT_TIMEBASE_FILTER,
     `scale=${DETECT_WIDTH}:-2`,
-    `select='gt(scene,${opts.threshold})'`,
-    "metadata=mode=print:file=-",
+    "select='gte(scene,0)'",
+    "metadata=mode=print:key=lavfi.scene_score:file=-",
   ].join(",");
 
   try {
     await runFfmpeg(
       [
-        ...rangeInputArgs(opts.range),
-        "-i", opts.videoPath,
+        ...mediaInputArgs(opts.videoPath, opts.range),
         "-vf", filter,
         "-fps_mode", "passthrough",
         "-an",
@@ -101,17 +126,53 @@ export async function detectShots(opts: DetectShotsOptions): Promise<Shot[]> {
         onProgress: opts.onProgress,
         onStdoutLine: (line) => {
           const pts = parsePtsLine(line);
-          if (pts !== null) cuts.push(pts + offset);
+          if (pts !== null) {
+            previous = current;
+            current = pts + offset;
+            return;
+          }
+
+          const score = SCENE_SCORE_LINE.exec(line);
+          if (
+            score &&
+            Number(score[1]) > opts.threshold &&
+            current !== null &&
+            previous !== null
+          ) {
+            cuts.push(current);
+            frameBeforeCut.set(current, previous);
+          }
         },
       },
     );
   } catch (err) {
     if (opts.signal?.aborted) throw opts.signal.reason;
+    if (current === null && opts.range) {
+      throw new ValidationError("No video frames in the requested range");
+    }
     const message = err instanceof Error ? err.message : String(err);
     throw new ProcessingError(`Shot detection failed: ${message}`);
   }
 
-  return buildShots(cuts, opts.span, opts.minShotSeconds);
+  if (current === null) {
+    throw new ValidationError(
+      opts.range
+        ? "No video frames in the requested range"
+        : "No video frames found",
+    );
+  }
+
+  // One frame's length past the last frame is where the video really ends.
+  const lastFrame: number = current;
+  const frameLength = previous === null ? 0 : lastFrame - previous;
+  const videoEnd = lastFrame + frameLength;
+
+  return buildShots(
+    cuts,
+    { start: opts.span.start, end: Math.min(opts.span.end, videoEnd) },
+    opts.minShotSeconds,
+    { frameBeforeCut, lastFrame },
+  );
 }
 
 export interface ShotFrameTarget {
@@ -119,9 +180,14 @@ export interface ShotFrameTarget {
   position: FramePosition;
   /** Where to seek, in seconds. */
   time: number;
+  /** The shot's final frame. A seek must not land past it. */
+  latest: number;
 }
 
-/** Decide which instants to capture, skipping positions that land together. */
+/**
+ * Decide which instants to capture, skipping positions that land together.
+ * `last` is the real final frame, known from the decode.
+ */
 export function planShotFrames(
   shots: Shot[],
   positions: FramePosition[],
@@ -135,14 +201,14 @@ export function planShotFrames(
     const times: Record<FramePosition, number> = {
       first: shot.start,
       middle: shot.start + shot.duration / 2,
-      last: Math.max(shot.start, shot.end - frameInterval),
+      last: Math.max(shot.start, shot.lastFrame),
     };
 
     let previous: number | null = null;
     for (const position of wanted) {
       const time = times[position];
       if (previous !== null && time - previous < frameInterval) continue;
-      targets.push({ shot: shot.index, position, time });
+      targets.push({ shot: shot.index, position, time, latest: shot.lastFrame });
       previous = time;
     }
   }
@@ -173,7 +239,10 @@ function frameFilter(preset: ResolvedPreset): string {
   ].join(",");
 }
 
-/** Grab one frame at a time. Returns its true time, or null if none was there. */
+/**
+ * Grab one frame. Returns its true time, or null if there was none to grab:
+ * some encoders fail rather than finish when no frame ever reaches them.
+ */
 async function grabFrame(
   videoPath: string,
   seek: number,
@@ -184,9 +253,11 @@ async function grabFrame(
   const start = Math.max(0, seek - SEEK_LEAD_SECONDS);
   let pts: number | null = null;
 
-  await runFfmpeg(
+  try {
+    await runFfmpeg(
     [
       "-ss", String(start),
+      ...MEDIA_INPUT_OPTIONS,
       "-i", videoPath,
       "-vf", frameFilter(preset),
       "-frames:v", "1",
@@ -204,7 +275,11 @@ async function grabFrame(
         pts ??= parsePtsLine(line);
       },
     },
-  );
+    );
+  } catch (err) {
+    if (pts !== null || signal?.aborted) throw err;
+    return null;
+  }
 
   return pts === null ? null : start + pts;
 }
@@ -218,30 +293,44 @@ export async function extractShotFrames(
 ): Promise<ShotFrame[]> {
   await mkdir(opts.outputDir, { recursive: true });
 
+  // One failure stops the other workers too: they run on the job's slot, and
+  // must all be finished before that slot goes to the next job.
+  const failure = new AbortController();
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, failure.signal])
+    : failure.signal;
+
   const ext = opts.preset.format === "png" ? "png" : "jpg";
   const results: Array<ShotFrame | null> = opts.targets.map(() => null);
   let nextTarget = 0;
   let finished = 0;
 
   const worker = async (): Promise<void> => {
-    while (nextTarget < opts.targets.length) {
+    while (nextTarget < opts.targets.length && !signal.aborted) {
       const index = nextTarget++;
       const target = opts.targets[index]!;
       const name = `frame_${String(index + 1).padStart(4, "0")}.${ext}`;
       const file = join(opts.outputDir, name);
 
       try {
-        // The container's duration can run past the last frame, so the end of
-        // the final shot may have nothing to land on. Step back once if so.
-        const time =
-          (await grabFrame(opts.videoPath, target.time, file, opts.preset, opts.signal)) ??
-          (await grabFrame(
+        let time = await grabFrame(
+          opts.videoPath,
+          target.time,
+          file,
+          opts.preset,
+          signal,
+        );
+
+        // A gap in the source can carry a seek past the cut into the next shot.
+        if (time === null || time > target.latest + SEEK_LEAD_SECONDS) {
+          time = await grabFrame(
             opts.videoPath,
-            Math.max(0, target.time - 1),
+            target.latest,
             file,
             opts.preset,
-            opts.signal,
-          ));
+            signal,
+          );
+        }
 
         if (time !== null) {
           results[index] = {
@@ -252,9 +341,13 @@ export async function extractShotFrames(
           };
         }
       } catch (err) {
-        if (opts.signal?.aborted) throw opts.signal.reason;
+        if (signal.aborted) throw signal.reason;
         const message = err instanceof Error ? err.message : String(err);
-        throw new ProcessingError(`Shot frame extraction failed: ${message}`);
+        const wrapped = new ProcessingError(
+          `Shot frame extraction failed: ${message}`,
+        );
+        failure.abort(wrapped);
+        throw wrapped;
       }
 
       finished += 1;
@@ -263,7 +356,12 @@ export async function extractShotFrames(
   };
 
   const workers = Math.min(MAX_FRAME_WORKERS, availableParallelism());
-  await Promise.all(Array.from({ length: workers }, worker));
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: workers }, worker),
+  );
+  for (const outcome of outcomes) {
+    if (outcome.status === "rejected") throw outcome.reason;
+  }
 
   return results.filter((frame): frame is ShotFrame => frame !== null);
 }

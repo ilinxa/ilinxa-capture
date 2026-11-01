@@ -13,7 +13,17 @@ export function createGetJobHandler(jobManager: JobManager) {
       // Return the full sync response body directly (per spec)
       void reply
         .header("content-type", "application/json; charset=utf-8")
-        .send(JSON.stringify(job.result));
+        .send(
+          JSON.stringify(
+            // Extra work on a finished job failed, leaving its output intact.
+            job.error === null
+              ? job.result
+              : {
+                  ...(job.result as object),
+                  last_error: { code: job.error_code, message: job.error },
+                },
+          ),
+        );
       return;
     }
 

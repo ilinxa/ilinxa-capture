@@ -192,7 +192,128 @@ describe("JobManager lifecycle", () => {
     expect(started).toBe(false);
   });
 
+  it("frees a skipped job's upload, whether deleted or shut down in the queue", async () => {
+    const manager = createManager({ MAX_CONCURRENT_JOBS: 1 });
+    const first = await manager.createJob("cap_00000018", { type: "extract" });
+    const queued = await manager.createJob("cap_00000019", { type: "extract" });
+
+    const running = manager.runSync(first.id, hang).catch(() => {});
+    await waitFor(() => first.status === "processing");
+
+    const onSkipped = vi.fn().mockResolvedValue(undefined);
+    manager.runAsync(queued.id, async () => "never", onSkipped);
+
+    await manager.deleteJob(queued.id);
+    await manager.deleteJob(first.id);
+    await running;
+
+    await waitFor(() => onSkipped.mock.calls.length > 0);
+  });
+
+  it("cancels a queued job so it never starts", async () => {
+    const manager = createManager({ MAX_CONCURRENT_JOBS: 1 });
+    const first = await manager.createJob("cap_0000001a", { type: "extract" });
+    const queued = await manager.createJob("cap_0000001b", { type: "extract" });
+
+    const running = manager.runSync(first.id, hang).catch(() => {});
+    await waitFor(() => first.status === "processing");
+
+    let started = false;
+    const waiting = manager
+      .runSync(queued.id, async () => {
+        started = true;
+      })
+      .catch((err: unknown) => err);
+
+    manager.cancelJob(queued.id);
+    manager.cancelJob(first.id);
+    await running;
+
+    expect(await waiting).toMatchObject({ code: "JOB_CANCELLED" });
+    expect(started).toBe(false);
+    expect(queued.status).toBe("failed");
+  });
+
+  it("cancels a running job but keeps its record", async () => {
+    const manager = createManager();
+    const job = await manager.createJob("cap_0000001c", { type: "extract" });
+    const run = manager.runSync(job.id, hang).catch((err: unknown) => err);
+    await waitFor(() => job.status === "processing");
+    await new Promise((r) => setTimeout(r, 30));
+
+    manager.cancelJob(job.id);
+
+    expect(await run).toMatchObject({ code: "JOB_CANCELLED" });
+    expect(manager.getJob(job.id).status).toBe("failed");
+  });
+
+  it("runs transient work under the same limits as a job", async () => {
+    const manager = createManager({ JOB_TIMEOUT: 1, MAX_CONCURRENT_JOBS: 1 });
+
+    let concurrent = 0;
+    let peak = 0;
+    const work = (signal: AbortSignal): Promise<never> =>
+      new Promise((_resolve, reject) => {
+        peak = Math.max(peak, ++concurrent);
+        signal.addEventListener("abort", () => {
+          concurrent--;
+          reject(signal.reason);
+        });
+      });
+
+    const results = await Promise.allSettled([
+      manager.runTransient(work),
+      manager.runTransient(work),
+    ]);
+
+    expect(peak).toBe(1);
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    expect(results[0]).toMatchObject({ reason: { code: "JOB_TIMEOUT" } });
+  }, 10_000);
+
+  // Regression: a reopen landing as the previous run finished had its active
+  // entry deleted by the old run, so nothing could stop it any more.
+  it("still stops a job reopened just as its previous run finished", async () => {
+    for (let round = 0; round < 8; round++) {
+      const manager = createManager();
+      const id = `cap_000002${round.toString(16).padStart(2, "0")}`;
+      const job = await manager.createJob(id, { type: "extract" });
+
+      const big = { frames: "x".repeat(2_000_000) };
+      const first = manager.runSync(job.id, async () => big);
+      await waitFor(() => job.status === "completed");
+
+      await manager.reopenJob(job.id, { type: "combined" });
+      const second = manager.runSync(job.id, hang).catch((err: unknown) => err);
+      await first;
+      await waitFor(() => job.status === "processing");
+
+      await manager.deleteJob(job.id);
+      expect(await second).toMatchObject({ code: "JOB_CANCELLED" });
+    }
+  });
+
   describe("reopen", () => {
+    it("returns to its earlier standing when the new work fails", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_0000001d", { type: "extract" });
+      await manager.runSync(job.id, async () => ({ frames: 3 }));
+      const completedAt = job.completed_at;
+
+      await manager.reopenJob(job.id, { type: "combined" });
+      await manager
+        .runSync(job.id, async () => {
+          throw new Error("compose failed");
+        })
+        .catch(() => {});
+
+      expect(job.status).toBe("completed");
+      expect(job.type).toBe("extract");
+      expect(job.completed_at).toBe(completedAt);
+      expect(job.result).toEqual({ frames: 3 });
+      expect(job.error).toBe("compose failed");
+    });
+
     it("keeps the earlier result for the task to build on", async () => {
       const manager = createManager();
       const job = await manager.createJob("cap_0000000a", { type: "extract" });
@@ -309,6 +430,27 @@ describe("JobManager lifecycle", () => {
       const manager = createManager();
       await manager.recover();
       expect(manager.getJob("cap_00000012").error_code).toBeNull();
+    });
+
+    it("keeps a job's earlier output when a reopen was interrupted", async () => {
+      await mkdir(join(dir, "cap_0000001e"));
+      await writeFile(
+        join(dir, "cap_0000001e", "job.json"),
+        JSON.stringify({
+          id: "cap_0000001e",
+          type: "combined",
+          status: "processing",
+          created_at: "2026-01-01T00:00:00.000Z",
+          result: { frames: { count: 3 } },
+        }),
+      );
+
+      const manager = createManager();
+      await manager.recover();
+
+      const job = manager.getJob("cap_0000001e");
+      expect(job.status).toBe("completed");
+      expect(job.error).toContain("restarted");
     });
 
     it("marks an interrupted job failed", async () => {

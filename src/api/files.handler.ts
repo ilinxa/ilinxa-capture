@@ -65,7 +65,13 @@ export function createFileHandler(jobManager: JobManager, storage: Storage) {
 
     void reply
       .header("content-type", contentType)
-      .header("cache-control", "public, max-age=3600")
+      // Frames never change. Sheets and the manifest are rewritten by re-compose.
+      .header(
+        "cache-control",
+        relativePath.startsWith("frames/")
+          ? "public, max-age=3600"
+          : "no-cache",
+      )
       .send(buffer);
   };
 }

@@ -21,7 +21,11 @@ import {
   shotsOptionsShape,
   videoDownloadOptionsShape,
 } from "../core/options.js";
-import { CaptureService, type Submission } from "../core/service.js";
+import {
+  CaptureService,
+  type RunOptions,
+  type Submission,
+} from "../core/service.js";
 import type { Env } from "../lib/env.js";
 
 /** Longest list returned inline. Beyond this, callers page through the manifest. */
@@ -60,6 +64,20 @@ async function guarded(
   }
 }
 
+/**
+ * How a tool call follows its job. A sync call reports progress if asked and
+ * stops the job if the client cancels. An async call has already returned, so
+ * notifications would arrive after the response, which the protocol forbids.
+ */
+function runOptions(args: { async: boolean }, extra: ToolExtra): RunOptions {
+  if (args.async) return { async: true };
+  return {
+    async: false,
+    onProgress: progressSender(extra),
+    signal: extra.signal,
+  };
+}
+
 /** Forward job progress to a client that asked for it with a progress token. */
 function progressSender(
   extra: ToolExtra,
@@ -96,7 +114,7 @@ function inlineList<T>(items: T[]): T[] {
  * Trim a job result for an agent's context. A film can yield thousands of
  * frames, and every path listed is tokens spent. The manifest holds it all.
  */
-function compactResult(result: unknown, jobDir: string): unknown {
+export function compactResult(result: unknown, jobDir: string): unknown {
   if (typeof result !== "object" || result === null) return result;
 
   const { frames, sheets, shots, manifest_url: _url, ...rest } = result as {
@@ -198,10 +216,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       guarded(async () => {
         const source = await service.resolveSource(args.source);
         return outcome(
-          await service.extract(source, args, {
-            async: args.async,
-            onProgress: progressSender(extra),
-          }),
+          await service.extract(source, args, runOptions(args, extra)),
         );
       }),
   );
@@ -220,10 +235,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
     async (args, extra) =>
       guarded(async () =>
         outcome(
-          await service.compose(args, {
-            async: args.async,
-            onProgress: progressSender(extra),
-          }),
+          await service.compose(args, runOptions(args, extra)),
         ),
       ),
   );
@@ -244,10 +256,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       guarded(async () => {
         const source = await service.resolveSource(args.source);
         return outcome(
-          await service.extractAndCompose(source, args, {
-            async: args.async,
-            onProgress: progressSender(extra),
-          }),
+          await service.extractAndCompose(source, args, runOptions(args, extra)),
         );
       }),
   );
@@ -270,10 +279,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       guarded(async () => {
         const source = await service.resolveSource(args.source);
         return outcome(
-          await service.detectShots(source, args, {
-            async: args.async,
-            onProgress: progressSender(extra),
-          }),
+          await service.detectShots(source, args, runOptions(args, extra)),
         );
       }),
   );
@@ -294,10 +300,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
       guarded(async () => {
         const source = await service.resolveSource(args.source);
         return outcome(
-          await service.extractAudio(source, args, {
-            async: args.async,
-            onProgress: progressSender(extra),
-          }),
+          await service.extractAudio(source, args, runOptions(args, extra)),
         );
       }),
   );
@@ -340,10 +343,7 @@ export function registerTools(server: McpServer, deps: ToolDeps): void {
     async (args, extra) =>
       guarded(async () =>
         outcome(
-          await service.downloadVideo(args, {
-            async: args.async,
-            onProgress: progressSender(extra),
-          }),
+          await service.downloadVideo(args, runOptions(args, extra)),
         ),
       ),
   );

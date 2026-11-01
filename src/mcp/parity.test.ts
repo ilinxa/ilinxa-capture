@@ -7,8 +7,11 @@ import {
   combinedRequestSchema,
   composeRequestSchema,
   extractRequestSchema,
+  hlsDiscoverRequestSchema,
+  metadataRequestSchema,
   shotsRequestSchema,
   videoDownloadRequestSchema,
+  videoFormatsRequestSchema,
 } from "../api/schemas.js";
 import type { JobManager } from "../core/job-manager.js";
 import { createTestEnv } from "../test/env.js";
@@ -57,6 +60,35 @@ describe("REST and MCP stay in step", () => {
     const mcp = Object.keys(tools.get(tool) ?? {}).sort();
 
     expect(mcp).toEqual(rest);
+  });
+
+  it.each(PAIRS)("%s has the same defaults as REST", (tool, schema) => {
+    const options = tools.get(tool) ?? {};
+
+    for (const [name, option] of Object.entries(options)) {
+      const field = schema.shape[name];
+      const parsed = field?.safeParse(undefined);
+      if (!parsed?.success || parsed.data === undefined) continue;
+
+      expect((option as { default?: unknown }).default, `${tool}.${name}`).toEqual(
+        parsed.data,
+      );
+    }
+  });
+
+  it("covers the tools that take options but start no job", () => {
+    expect(Object.keys(tools.get("capture_metadata") ?? {})).toEqual(
+      Object.keys(metadataRequestSchema.shape),
+    );
+    for (const tool of ["capture_video_formats", "capture_hls_discover"]) {
+      const schema =
+        tool === "capture_video_formats"
+          ? videoFormatsRequestSchema
+          : hlsDiscoverRequestSchema;
+      expect(Object.keys(tools.get(tool) ?? {}).sort()).toEqual(
+        Object.keys(schema.shape).sort(),
+      );
+    }
   });
 
   it.each(PAIRS)("every option of %s is described for agents", (tool) => {

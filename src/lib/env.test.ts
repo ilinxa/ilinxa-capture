@@ -43,6 +43,17 @@ describe("loadEnv", () => {
     expect(env.MAX_VIDEO_DURATION).toBe(1200);
   });
 
+  it("defaults to production, so only npm run dev gets development behavior", () => {
+    delete process.env["NODE_ENV"];
+    expect(loadEnv().NODE_ENV).toBe("production");
+  });
+
+  it("refuses a JOB_TIMEOUT too long for a Node timer", () => {
+    process.env["JOB_TIMEOUT"] = "2147484";
+    expect(() => loadEnv()).toThrow("JOB_TIMEOUT");
+    delete process.env["JOB_TIMEOUT"];
+  });
+
   it("validates NODE_ENV enum", () => {
     process.env["NODE_ENV"] = "invalid";
 

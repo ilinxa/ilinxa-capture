@@ -40,7 +40,14 @@ jobs:
       - run: npm test -- --run
       - run: npm run test:integration -- --run
       - run: npm run build
-      - run: npm pack --dry-run
+      - name: A packed install starts and exits cleanly
+        shell: bash
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP"
+          npm init -y
+          npm install ./ilinxa-capture-*.tgz
+          node node_modules/ilinxa-capture/dist/mcp-entry.js < /dev/null
 
   docker:
     runs-on: ubuntu-latest

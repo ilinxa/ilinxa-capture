@@ -1,5 +1,6 @@
 import { ProcessingError } from "../utils/errors.js";
 import { execFileAsync } from "../utils/exec.js";
+import { MEDIA_INPUT_OPTIONS } from "./ffmpeg.js";
 
 export interface AudioStream {
   /** Among audio streams only: 0 is the first audio stream. */
@@ -63,6 +64,36 @@ export function parseFps(rFrameRate: string | undefined): number {
 }
 
 /**
+ * Duration of a file whose container does not state one, such as a piped MKV.
+ * Reads packets rather than decoding, so it takes seconds even on a film.
+ */
+async function measureDuration(
+  source: string,
+  signal: AbortSignal | undefined,
+): Promise<number> {
+  let last = 0;
+  await execFileAsync(
+    "ffprobe",
+    [
+      "-v", "error",
+      ...MEDIA_INPUT_OPTIONS,
+      "-select_streams", "v:0",
+      "-show_entries", "packet=pts_time",
+      "-of", "csv=p=0",
+      source,
+    ],
+    {
+      signal,
+      onStdoutLine: (line) => {
+        const pts = parseFloat(line);
+        if (pts > last) last = pts;
+      },
+    },
+  );
+  return last;
+}
+
+/**
  * Extract video metadata using ffprobe.
  * Accepts a local file path or a direct HTTP/HTTPS URL.
  */
@@ -77,6 +108,7 @@ export async function getVideoMetadata(
       "ffprobe",
       [
         "-v", "error",
+        ...MEDIA_INPUT_OPTIONS,
         "-print_format", "json",
         "-show_format",
         "-show_streams",
@@ -108,7 +140,9 @@ export async function getVideoMetadata(
     throw new ProcessingError("No format information found in file");
   }
 
-  const duration = parseFloat(format.duration ?? videoStream.duration ?? "0");
+  const stated = parseFloat(format.duration ?? videoStream.duration ?? "0");
+  const duration =
+    stated > 0 ? stated : await measureDuration(source, opts.signal);
   const sizeBytes = parseInt(format.size ?? "0", 10);
 
   // format_name can be comma-separated (e.g. "mov,mp4,m4a,3gp,3g2,mj2") — take the first

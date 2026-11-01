@@ -3,6 +3,18 @@ import { buildApp } from "./app.js";
 import { CleanupScheduler } from "./core/cleanup.js";
 
 async function main(): Promise<void> {
+  // Set by `npm run dev`, so a plain start never gets development behavior.
+  if (process.argv.includes("--dev")) {
+    process.env["NODE_ENV"] ??= "development";
+  }
+
+  // Values already in the environment win over the file.
+  try {
+    process.loadEnvFile();
+  } catch {
+    // No .env file: configuration comes from the environment alone
+  }
+
   let env;
   try {
     env = loadEnv();
@@ -20,6 +32,7 @@ async function main(): Promise<void> {
     ttlSeconds: env.LOCAL_TTL_SECONDS,
     logger: app.log,
     onJobRemoved: (jobId) => app.jobManager.forgetJob(jobId),
+    isBusy: (jobId) => app.jobManager.isBusy(jobId),
   });
   cleanupScheduler.start();
 

@@ -29,6 +29,7 @@ async function main(): Promise<void> {
     ttlSeconds: env.LOCAL_TTL_SECONDS,
     logger,
     onJobRemoved: (jobId) => jobManager.forgetJob(jobId),
+    isBusy: (jobId) => jobManager.isBusy(jobId),
   });
   cleanupScheduler.start();
 
@@ -53,6 +54,10 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   };
+
+  // The SDK does not notice its client leaving. A job left running with no
+  // timeout would otherwise keep going for nobody.
+  process.stdin.once("end", () => void shutdown("stdin closed"));
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

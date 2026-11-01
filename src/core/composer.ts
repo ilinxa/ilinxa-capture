@@ -28,6 +28,8 @@ export interface CompositionOptions {
   labels?: Array<FrameLabel | undefined> | undefined;
   /** Longest sheet edge in pixels for grid modes. 0 or absent means no limit. */
   maxSheetEdge?: number | undefined;
+  /** Frames this service wrote itself, which can be read in parallel. */
+  trustedFrames?: boolean | undefined;
   signal?: AbortSignal | undefined;
   onProgress?: ((percent: number) => void) | undefined;
 }
@@ -142,7 +144,11 @@ function chunk<T>(arr: T[], size: number): T[][] {
  * from a caller, and a sheet is served back to them, so nothing but a real image
  * may reach the output, in any mode.
  */
-async function inspectFrames(files: string[]): Promise<FrameInfo[]> {
+async function inspectFrames(
+  files: string[],
+  trusted: boolean,
+  signal: AbortSignal | undefined,
+): Promise<FrameInfo[]> {
   const inspect = async (path: string, index: number): Promise<FrameInfo> => {
     let meta: Metadata;
     try {
@@ -160,10 +166,14 @@ async function inspectFrames(files: string[]): Promise<FrameInfo[]> {
     return { path, width, height, format };
   };
 
+  // One at a time for frames from a caller: sharp can abort the whole process
+  // on Windows when bad decodes run in parallel.
+  const concurrency = trusted ? VALIDATE_CONCURRENCY : 1;
   const frames: FrameInfo[] = [];
-  const batches = chunk(files, VALIDATE_CONCURRENCY);
+  const batches = chunk(files, concurrency);
   for (let b = 0; b < batches.length; b++) {
-    const offset = b * VALIDATE_CONCURRENCY;
+    signal?.throwIfAborted();
+    const offset = b * concurrency;
     frames.push(
       ...(await Promise.all(
         batches[b]!.map((path, i) => inspect(path, offset + i)),
@@ -182,7 +192,11 @@ export async function composeGrid(
   const framesPerSheet = cols * rows;
   const hasOverlays = opts.overlays.frameNumber || opts.overlays.timestamp;
 
-  const frames = await inspectFrames(opts.frameFiles);
+  const frames = await inspectFrames(
+    opts.frameFiles,
+    opts.trustedFrames ?? false,
+    opts.signal,
+  );
   const first = frames[0];
   if (!first) {
     throw new ValidationError("No frames to compose");

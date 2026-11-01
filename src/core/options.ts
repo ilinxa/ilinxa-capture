@@ -10,6 +10,7 @@ import { JOB_ID_PATTERN } from "./job-id.js";
 export interface Scalars {
   number(): z.ZodNumber;
   boolean(): z.ZodBoolean;
+  list<T extends z.ZodType>(item: T): z.ZodArray<T>;
 }
 
 // z.coerce.boolean() would read the string "false" as true.
@@ -19,14 +20,29 @@ const formBoolean = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+// A form has no arrays: accept "first,last", and "none" for an empty list. A
+// repeated field reaches here as an array already.
+function formList<T extends z.ZodType>(item: T): z.ZodArray<T> {
+  return z.preprocess((value) => {
+    if (value === "none") return [];
+    if (typeof value !== "string") return value;
+    return value
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }, z.array(item)) as unknown as z.ZodArray<T>;
+}
+
 export const restScalars: Scalars = {
   number: () => z.coerce.number() as unknown as z.ZodNumber,
   boolean: () => formBoolean as unknown as z.ZodBoolean,
+  list: formList,
 };
 
 export const mcpScalars: Scalars = {
   number: () => z.number(),
   boolean: () => z.boolean(),
+  list: (item) => z.array(item),
 };
 
 export const httpUrlSchema = z
@@ -37,6 +53,13 @@ export const httpUrlSchema = z
   });
 
 const jobIdSchema = z.string().regex(JOB_ID_PATTERN, "Invalid job ID");
+
+// An .m3u8 here is handed to FFmpeg as a URL, so it must be one.
+const formatSelectorSchema = z.string().refine(
+  (selector) =>
+    !/\.m3u8(\?|$)/i.test(selector) || /^https?:\/\//i.test(selector),
+  { message: "An .m3u8 format_selector must be an http or https URL" },
+);
 const timeSchema = z.union([z.number().nonnegative(), z.string()]);
 const headersSchema = z.record(z.string(), z.string()).optional();
 
@@ -196,8 +219,8 @@ export function shotsOptionsShape(s: Scalars) {
       .max(60)
       .default(0.25)
       .describe("Shortest shot to keep. Closer cuts are ignored"),
-    frame_positions: z
-      .array(z.enum(["first", "middle", "last"]))
+    frame_positions: s
+      .list(z.enum(["first", "middle", "last"]))
       .default(["middle"])
       .describe("Frames to capture from each shot. Empty for the shot list only"),
     ...presetShape(s),
@@ -244,8 +267,7 @@ export function videoDownloadOptionsShape(s: Scalars) {
       .enum(["best", "1080p", "720p", "480p", "360p", "audio_only"])
       .optional()
       .describe("Download quality preset (default: best)"),
-    format_selector: z
-      .string()
+    format_selector: formatSelectorSchema
       .optional()
       .describe(
         "Advanced: raw yt-dlp format selector or HLS variant .m3u8 URL (overrides preset)",

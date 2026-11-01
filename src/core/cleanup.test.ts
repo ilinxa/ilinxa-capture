@@ -3,17 +3,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("node:fs/promises", () => ({
   readdir: vi.fn(),
   readFile: vi.fn(),
+  rename: vi.fn(),
   rm: vi.fn(),
   stat: vi.fn(),
 }));
 
-import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { CleanupScheduler } from "./cleanup.js";
 
 const mockReaddir = vi.mocked(readdir);
 const mockReadFile = vi.mocked(readFile);
+const mockRename = vi.mocked(rename);
 const mockRm = vi.mocked(rm);
 const mockStat = vi.mocked(stat);
 
@@ -21,6 +23,15 @@ const logger = {
   info: vi.fn(),
   warn: vi.fn(),
 };
+
+function expiredJob(): string {
+  return JSON.stringify({
+    id: "cap_0000beef",
+    status: "completed",
+    completed_at: "2020-01-01T00:00:00.000Z",
+    failed_at: null,
+  });
+}
 
 function createScheduler(ttlSeconds = 3600) {
   return new CleanupScheduler({
@@ -40,6 +51,118 @@ function makeJobJson(status: string, timestamp: string | null): string {
 }
 
 describe("CleanupScheduler", () => {
+  describe("what a sweep may touch", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      mockRename.mockResolvedValue(undefined);
+      mockRm.mockResolvedValue(undefined);
+      mockReadFile.mockResolvedValue(expiredJob());
+    });
+
+    function jobsThen(entries: string[]): void {
+      mockReaddir
+        .mockResolvedValueOnce(entries as unknown as Awaited<ReturnType<typeof readdir>>)
+        .mockResolvedValueOnce([] as unknown as Awaited<ReturnType<typeof readdir>>);
+    }
+
+    it("ignores anything not named like a job, even with a job.json inside", async () => {
+      jobsThen(["photos", "cap_short", "CAP_0000BEEF"]);
+
+      const cleaned = await createScheduler().sweep();
+
+      expect(cleaned).toBe(0);
+      expect(mockRename).not.toHaveBeenCalled();
+      expect(mockRm).not.toHaveBeenCalled();
+    });
+
+    it("tells the registry about each job it removes", async () => {
+      jobsThen(["cap_0000beef"]);
+      const onJobRemoved = vi.fn();
+      const scheduler = new CleanupScheduler({
+        outputDir: "/data/jobs",
+        ttlSeconds: 3600,
+        logger,
+        onJobRemoved,
+      });
+
+      await scheduler.sweep();
+
+      expect(onJobRemoved).toHaveBeenCalledWith("cap_0000beef");
+    });
+
+    it("leaves a job alone while work on it is queued or running", async () => {
+      jobsThen(["cap_0000beef"]);
+      const scheduler = new CleanupScheduler({
+        outputDir: "/data/jobs",
+        ttlSeconds: 3600,
+        logger,
+        isBusy: () => true,
+      });
+
+      expect(await scheduler.sweep()).toBe(0);
+      expect(mockRename).not.toHaveBeenCalled();
+    });
+
+    // Regression: a locked file rejected out of sweep() and ended the process,
+    // after job.json had already gone, stranding the rest of the folder.
+    it("survives a locked job, keeps it whole, and carries on to the next", async () => {
+      jobsThen(["cap_0000beef", "cap_0000abc0"]);
+      mockRename.mockRejectedValueOnce(
+        Object.assign(new Error("busy"), { code: "EBUSY" }),
+      );
+      const onJobRemoved = vi.fn();
+      const scheduler = new CleanupScheduler({
+        outputDir: "/data/jobs",
+        ttlSeconds: 3600,
+        logger,
+        onJobRemoved,
+      });
+
+      const cleaned = await scheduler.sweep();
+
+      expect(cleaned).toBe(1);
+      expect(onJobRemoved).toHaveBeenCalledTimes(1);
+      expect(onJobRemoved).toHaveBeenCalledWith("cap_0000abc0");
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ jobId: "cap_0000beef" }),
+        "Could not remove expired job",
+      );
+    });
+
+    it("finishes a delete that stopped partway", async () => {
+      jobsThen(["cap_0000beef.deleting", "notes.deleting"]);
+
+      await createScheduler().sweep();
+
+      expect(mockRm).toHaveBeenCalledTimes(1);
+      expect(mockRm).toHaveBeenCalledWith(
+        join(resolve("/data/jobs"), "cap_0000beef.deleting"),
+        { recursive: true, force: true },
+      );
+    });
+
+    it("never lets a failed sweep reject out of start()", async () => {
+      vi.useRealTimers();
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      mockReaddir.mockRejectedValue(
+        Object.assign(new Error("denied"), { code: "EACCES" }),
+      );
+
+      const scheduler = createScheduler();
+      scheduler.start();
+      await new Promise((r) => setTimeout(r, 20));
+      scheduler.stop();
+      process.off("unhandledRejection", unhandled);
+
+      expect(unhandled).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.anything(),
+        "Cleanup sweep failed",
+      );
+    });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();

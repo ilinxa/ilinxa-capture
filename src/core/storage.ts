@@ -81,7 +81,7 @@ export class LocalStorage implements Storage {
     jobId: string,
     subDir?: "frames" | "sheets",
   ): Promise<FileInfo[]> {
-    const dirs = subDir ? [subDir] : ["frames", "sheets"];
+    const dirs = subDir ? [subDir] : ["frames", "sheets", "audio"];
     const results: FileInfo[] = [];
 
     for (const dir of dirs) {

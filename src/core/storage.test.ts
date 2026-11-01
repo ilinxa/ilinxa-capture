@@ -121,7 +121,8 @@ describe("LocalStorage", () => {
     it("lists files from both frames and sheets when no filter", async () => {
       mockReaddir
         .mockResolvedValueOnce(["frame_0001.jpg", "frame_0002.jpg"] as unknown as Awaited<ReturnType<typeof readdir>>)
-        .mockResolvedValueOnce(["sheet_001.jpg"] as unknown as Awaited<ReturnType<typeof readdir>>);
+        .mockResolvedValueOnce(["sheet_001.jpg"] as unknown as Awaited<ReturnType<typeof readdir>>)
+        .mockResolvedValueOnce([] as unknown as Awaited<ReturnType<typeof readdir>>);
 
       mockStat.mockResolvedValue({
         size: 1000,

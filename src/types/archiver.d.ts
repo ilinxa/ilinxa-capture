@@ -5,6 +5,8 @@ declare module "archiver" {
   export class ZipArchive extends Transform {
     constructor(options?: { zlib?: { level?: number } });
     append(source: Readable | Buffer | string, data: { name: string }): this;
+    /** Opens the file only when its turn comes, unlike append(createReadStream()). */
+    file(path: string, data: { name: string }): this;
     finalize(): Promise<void>;
   }
 }

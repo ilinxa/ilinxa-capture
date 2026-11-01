@@ -5,6 +5,9 @@ const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 const STDERR_TAIL_CHARS = 16 * 1024;
 const ERROR_TAIL_CHARS = 2000;
 const KILL_GRACE_MS = 3000;
+// A descendant that left the process tree can hold the pipes open, so `close`
+// never fires. Past this, stop waiting: a job must not hang on it forever.
+const SETTLE_LIMIT_MS = KILL_GRACE_MS + 2000;
 
 export interface ExecOptions {
   /** Max bytes of stdout to retain. Ignored when onStdoutLine consumes it. */
@@ -97,6 +100,7 @@ export function execFileAsync(
     let stderrTail = "";
     let failure: { reason: unknown } | null = null;
     let forceKillTimer: NodeJS.Timeout | null = null;
+    let settleTimer: NodeJS.Timeout | null = null;
     let timeoutTimer: NodeJS.Timeout | null = null;
 
     const stop = (reason: unknown): void => {
@@ -104,6 +108,12 @@ export function execFileAsync(
       failure = { reason };
       killTree(child, false);
       forceKillTimer = setTimeout(() => killTree(child, true), KILL_GRACE_MS);
+      settleTimer = setTimeout(() => {
+        cleanup();
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        reject(reason);
+      }, SETTLE_LIMIT_MS);
     };
 
     const onAbort = (): void => stop(opts.signal?.reason);
@@ -142,6 +152,7 @@ export function execFileAsync(
       opts.signal?.removeEventListener("abort", onAbort);
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (settleTimer) clearTimeout(settleTimer);
     };
 
     child.once("error", (err) => {
