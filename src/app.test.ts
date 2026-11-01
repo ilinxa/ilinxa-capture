@@ -51,6 +51,18 @@ describe("buildApp", () => {
     await app.close();
   });
 
+  // Regression: it read process.env and fell back to "development", so a server
+  // running with production defaults described itself as development.
+  it("health reports the environment the server resolved", async () => {
+    const app = await buildApp({ env: createTestEnv({ NODE_ENV: "production" }), logger: false });
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/health" });
+
+    expect((JSON.parse(response.body) as { environment: string }).environment).toBe("production");
+
+    await app.close();
+  });
+
   it("unknown route returns 404 with error shape", async () => {
     const app = await buildApp({ env, logger: false });
 

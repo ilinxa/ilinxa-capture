@@ -173,10 +173,19 @@ describe("getVideoMetadata", () => {
 
     expect(failure).toMatchObject({ code: "UNSUPPORTED_FORMAT", statusCode: 400 });
     const { message } = failure as Error;
-    expect(message).toContain("film.mp4: Invalid data");
+    expect(message).toContain("Not a readable video: Invalid data found");
     expect(message).toContain("MKV");
     expect(message).not.toContain("/private/studio");
     expect(message).not.toContain("exited with");
+  });
+
+  it("names only the file when an error mentions the path mid-sentence", async () => {
+    const source = "/private/studio/film.mp4";
+    mockExec.mockRejectedValue(new Error(`could not open ${source} for reading`));
+
+    const failure = await getVideoMetadata(source).catch((err: unknown) => err);
+
+    expect((failure as Error).message).toContain("could not open film.mp4 for reading");
   });
 
   it("treats a missing ffprobe as a fault of the server, not the file", async () => {

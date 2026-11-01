@@ -43,7 +43,6 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     genReqId: () => randomUUID(),
     // Frame lists for compose run to hundreds of bytes per frame of a film.
     bodyLimit: 32 * 1024 * 1024,
-    requestIdLogLabel: "reqId",
   };
 
   const app = Fastify(fastifyOpts).withTypeProvider<ZodTypeProvider>();

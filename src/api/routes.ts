@@ -3,7 +3,7 @@ import type { Env } from "../lib/env.js";
 import type { JobManager } from "../core/job-manager.js";
 import type { Storage } from "../core/storage.js";
 import type { CaptureService } from "../core/service.js";
-import { healthCheckHandler, healthResponseSchema } from "./health.handler.js";
+import { createHealthHandler, healthResponseSchema } from "./health.handler.js";
 import { createMetadataHandler } from "./metadata.handler.js";
 import { createVideoJobHandler } from "./video-job.handler.js";
 import { createComposeHandler } from "./compose.handler.js";
@@ -57,7 +57,7 @@ export async function registerRoutes(
         response: { 200: healthResponseSchema },
       },
     },
-    healthCheckHandler,
+    createHealthHandler(opts.env),
   );
 
   app.post(

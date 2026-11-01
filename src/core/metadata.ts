@@ -154,7 +154,10 @@ function readFailure(
     return new ProcessingError(`ffprobe failed: ${message}`);
   }
 
+  // An upload's name is a temp file's, so the file's own errors drop it.
   const reason = message
+    .split(`${source}: `)
+    .join("")
     .split(source)
     .join(basename(source))
     .split("\n")
