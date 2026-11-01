@@ -2,63 +2,64 @@
 v: 1
 repo: ilinxa-capture
 type: oss
-release: 0.1.1
-updated: 2026-08-11
+release: 0.2.0
+updated: 2026-11-01
 brand: assets/brand/
 
 docs:
   readme:
     f: README.md
-    v: 0.1.1
-    h: 23e5c2
+    v: 0.2.0
+    h: 4ae44a
     ok: true
     blocks:
       hero:         {l: [1, 15]}
-      about:        {l: [17, 30]}
-      toc:          {l: [32, 51]}
-      demo:         {l: [53, 62]}
-      features:     {l: [64, 83]}
-      quickstart:   {l: [85, 109]}
-      usage:        {l: [111, 199]}
-      config:       {l: [201, 224]}
-      architecture: {l: [226, 285]}
-      development:  {l: [287, 315]}
-      testing:      {l: [317, 333]}
-      security:     {l: [335, 348], deps: [security.report]}
-      faq:          {l: [350, 376]}
-      contributing: {l: [378, 384]}
-      support:      {l: [386, 393], deps: [support.routes]}
-      license:      {l: [395, 399]}
+      about:        {l: [17, 31]}
+      toc:          {l: [33, 53]}
+      demo:         {l: [55, 64]}
+      features:     {l: [66, 92]}
+      quickstart:   {l: [94, 129]}
+      usage:        {l: [131, 269]}
+      config:       {l: [271, 305]}
+      architecture: {l: [307, 368]}
+      development:  {l: [370, 398]}
+      testing:      {l: [400, 419]}
+      security:     {l: [421, 445], deps: [security.report]}
+      faq:          {l: [447, 483]}
+      contributing: {l: [485, 491]}
+      support:      {l: [493, 500], deps: [support.routes]}
+      license:      {l: [502, 506]}
   changelog:
     f: CHANGELOG.md
-    v: 0.1.1
-    h: 849bc2
+    v: 0.2.0
+    h: 9595ce
     ok: true
     blocks:
-      unreleased: {l: [8, 10]}
-      "0-1-1":    {l: [12, 29]}
-      "0-1-0":    {l: [31, 54]}
+      unreleased:   {l: [8, 10]}
+      "0-2-0":    {l: [12, 85]}
+      "0-1-1":      {l: [87, 104]}
+      "0-1-0":      {l: [106, 129]}
   contributing:
     f: CONTRIBUTING.md
-    v: 0.1.0
-    h: "818577"
+    v: 0.2.0
+    h: a585f6
     ok: true
     blocks:
-      intro:       {l: [1, 6]}
-      setup:       {l: [8, 42]}
-      conventions: {l: [44, 68]}
-      testing:     {l: [70, 93]}
-      pr:          {l: [95, 107]}
-      issues:      {l: [109, 121]}
+      intro:        {l: [1, 6]}
+      setup:        {l: [8, 46]}
+      conventions:  {l: [48, 72]}
+      testing:      {l: [74, 102]}
+      pr:           {l: [104, 116]}
+      issues:       {l: [118, 130]}
   security:
     f: SECURITY.md
-    v: 0.1.0
-    h: 6b00b9
+    v: 0.2.0
+    h: f8ea0a
     ok: true
     blocks:
-      report:   {l: [3, 16]}
-      versions: {l: [18, 27]}
-      scope:    {l: [29, 37]}
+      report:       {l: [3, 16]}
+      versions:     {l: [18, 27]}
+      scope:        {l: [29, 45]}
   support:
     f: SUPPORT.md
     v: 0.1.0
@@ -68,14 +69,14 @@ docs:
       routes: {l: [3, 16], deps: [security.report]}
   guide:
     f: docs/GUIDE.md
-    v: 0.1.1
-    h: f95e59
+    v: 0.2.0
+    h: b2e105
     ok: true
     blocks:
-      overview: {l: [1, 33]}
-      webui:    {l: [35, 234]}
-      mcp:      {l: [236, 752]}
-      rest:     {l: [754, 1619]}
+      overview:     {l: [1, 129]}
+      webui:        {l: [131, 334]}
+      mcp:          {l: [336, 1276]}
+      rest:         {l: [1278, 2606]}
   code_of_conduct:
     f: CODE_OF_CONDUCT.md
     v: 0.1.0
@@ -102,6 +103,10 @@ docs:
 #                  demo.gif (README), demo.mp4 (16:9 social), demo-vertical.mp4 (9:16 Shorts)
 
 log:
+  - "2026-11-01 0.2.0 guide all blocks rewritten for 0.2.0; 12 MCP tools"
+  - "2026-11-01 0.2.0 readme features usage config security faq updated"
+  - "2026-11-01 0.2.0 changelog.0-2-0 added; breaking defaults listed"
+  - "2026-11-01 0.2.0 security versions scope; contributing setup testing"
   - "2026-08-11 0.1.1 readme.demo added; brand demo gif/mp4 from real pipeline output"
   - "2026-08-11 0.1.1 guide.rest health example version bumped to 0.1.1"
   - "2026-08-11 0.1.1 changelog.0-1-1 patch release; path traversal fix documented"

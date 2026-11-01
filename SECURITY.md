@@ -22,16 +22,24 @@ ilinxa capture is pre-1.0. Security fixes land on the latest minor release.
 
 | Version | Supported |
 |---|---|
-| 0.1.x | Yes |
-| < 0.1 | No |
+| 0.2.x | Yes |
+| < 0.2 | No |
 <!-- /wl -->
 
 <!-- wl:security.scope -->
 ## A note on deployment
 
 ilinxa capture ships with no authentication and, by design, fetches any URL it
-is given. It is meant for localhost or trusted-network use. Exposing it directly
-to untrusted callers is a deployment mistake rather than a vulnerability in the
-tool — see the [security model](README.md#security-model) for how to run it
-safely behind a gateway.
+is given. It is meant for localhost or trusted-network use, and its defaults bind
+to loopback. Binding it to a network, or publishing its port without
+`127.0.0.1:`, is your decision to make: the `Host` and `Origin` checks stop
+browsers, not other clients on that network. Exposing it to untrusted callers is
+a deployment mistake rather than a vulnerability in the tool. See the
+[security model](README.md#security-model) for how to run it safely behind a
+gateway.
+
+Reading any local path over the stdio transport is by design, because that
+server runs as you on your own machine. On Windows that includes network paths,
+so a UNC path makes your machine connect to that server. Set `ALLOWED_INPUT_DIRS`
+to limit stdio to the folders you name.
 <!-- /wl -->

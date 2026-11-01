@@ -9,9 +9,10 @@ setup, project conventions, and the pull-request workflow.
 ## Prerequisites
 
 - **Node.js 22+**
-- **FFmpeg** (with `ffprobe`) on `PATH` — required to run the app and the
+- **FFmpeg 5.1+** (with `ffprobe`) on `PATH`, required to run the app and the
   integration tests
-- **yt-dlp** on `PATH` — required for video-download features
+- **yt-dlp** on `PATH`, required for video-download features. Without it the URL
+  integration tests skip
 - **npm** (this project does not use pnpm or yarn)
 
 ## Getting started
@@ -24,21 +25,24 @@ cd ilinxa-capture
 npm ci
 npm run dev          # tsx watch on :3000
 
-# Web UI (separate terminal — it is its own npm project)
+# Web UI (separate terminal, it is its own npm project)
 cd ui && npm ci
 npm run dev          # Vite on :5173, proxies /api to :3000
 ```
 
+`npm run dev` passes `--dev`, which is what allows the Vite origin. A plain
+`npm start` never does, whatever is in `.env`.
+
 ## Project layout
 
-- `src/core/` — all business logic (extraction, composition, download, jobs,
-  storage, cleanup). Framework-agnostic.
-- `src/api/` — REST layer: routes, Zod schemas, thin handlers.
-- `src/mcp/` — MCP server and tool registration.
-- `ui/` — React SPA (separate `package.json`).
+- `src/core/` holds all business logic. `service.ts` owns every pipeline, and
+  `options.ts` defines every option once. Framework-agnostic.
+- `src/api/` is the REST layer: routes, Zod schemas, thin handlers.
+- `src/mcp/` is the MCP server and tool registration.
+- `ui/` is the React SPA (separate `package.json`).
 
-The golden rule: **REST and MCP layers stay thin** — new behavior belongs in
-`src/core/` with the interface layers only translating protocols.
+The golden rule: **REST and MCP layers stay thin**. New behavior belongs in
+`src/core/`, with the interface layers only translating protocols.
 <!-- /wl -->
 
 <!-- wl:contributing.conventions -->
@@ -70,24 +74,29 @@ The golden rule: **REST and MCP layers stay thin** — new behavior belongs in
 <!-- wl:contributing.testing -->
 ## Testing
 
-Every change must land **with its tests** — a fix without a regression test
-is incomplete.
+Every change must land **with its tests**. A fix without a regression test is
+incomplete, and the test must fail if the fix is reverted: try it.
 
 ```bash
 npm run typecheck                  # backend types
-npm test -- --run                  # backend unit (mocked binaries; fast)
-npm run test:integration -- --run  # real-FFmpeg end-to-end pipeline
+npm test -- --run                  # backend unit (fast)
+npm run test:integration -- --run  # real FFmpeg and yt-dlp, end to end
 cd ui && npm run lint && npm run typecheck && npm test -- --run && npm run build
 ```
 
 Notes:
 
-- Unit tests must stay **hermetic** — mock `node:child_process` and
-  `node:fs/promises`; never touch real binaries or the network.
-- Integration tests (`*.integration.test.ts`) are the opposite: **no mocks
-  allowed**. They are excluded from the unit run and executed via
-  `npm run test:integration`.
-- `app.inject()` does not reliably deliver streamed response bodies — test
+- Unit tests must stay **fast and offline**. Mock `execFileAsync` rather than
+  calling real binaries. Temp folders are fine.
+- Integration tests (`*.integration.test.ts`) drive the live API with real
+  binaries. Mock only what cannot be made to fail for real, such as a disk read
+  failing partway, and keep that in its own file. See
+  `src/integration/zip-errors.integration.test.ts`.
+- To prove which frame came back, use `makeBarcodeClip` and `barcodeOf` from
+  `src/integration/helpers.ts`. A label alone proves little.
+- FFmpeg behaves differently across versions. Timing changes must pass on 5.1 as
+  well as a current build.
+- `app.inject()` does not reliably deliver streamed response bodies, so test
   streaming endpoints through a real listener (see
   `src/integration/pipeline.integration.test.ts`) or assert on mocks.
 <!-- /wl -->
