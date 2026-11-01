@@ -166,11 +166,16 @@ export async function extractFrames(
     throw new ValidationError("No video frames in the requested range");
   }
 
+  // A frame with no printed time has no true time, and a computed one would pass for it.
+  if (printedTimes.length < frameFiles.length) {
+    throw new ProcessingError(
+      `FFmpeg printed ${printedTimes.length} frame times for ${frameFiles.length} frames`,
+    );
+  }
+
   return {
     frameFiles,
     frameCount: frameFiles.length,
-    frameTimes: frameFiles.map(
-      (_, i) => printedTimes[i] ?? start + i / opts.fps,
-    ),
+    frameTimes: printedTimes.slice(0, frameFiles.length),
   };
 }

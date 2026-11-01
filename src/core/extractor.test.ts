@@ -36,6 +36,10 @@ function printKept(opts: ExecOptions, index: number, seconds: number): void {
   opts?.onStdoutLine?.("capture=1");
 }
 
+function printFrames(opts: ExecOptions, count: number): void {
+  for (let i = 0; i < count; i++) printKept(opts, i, i);
+}
+
 describe("qualityToQscale", () => {
   it("maps 100 to 2 (best quality)", () => {
     expect(qualityToQscale(100)).toBe(2);
@@ -153,7 +157,10 @@ describe("extractFrames", () => {
   });
 
   it("creates output dir and returns frame list", async () => {
-    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+    mockExec.mockImplementation(async (_cmd, _args, opts) => {
+      printFrames(opts, 3);
+      return { stdout: "", stderr: "" };
+    });
 
     mockReaddir.mockResolvedValue([
       "frame_0001.jpg",
@@ -188,7 +195,10 @@ describe("extractFrames", () => {
   });
 
   it("orders frames numerically past 9,999", async () => {
-    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+    mockExec.mockImplementation(async (_cmd, _args, opts) => {
+      printFrames(opts, 3);
+      return { stdout: "", stderr: "" };
+    });
 
     mockReaddir.mockResolvedValue([
       "frame_10000.jpg",
@@ -208,6 +218,26 @@ describe("extractFrames", () => {
       "frame_9999.jpg",
       "frame_10000.jpg",
     ]);
+  });
+
+  it("fails rather than invent a time for a frame FFmpeg did not print", async () => {
+    mockExec.mockImplementation(async (_cmd, _args, opts) => {
+      printFrames(opts, 1);
+      return { stdout: "", stderr: "" };
+    });
+    mockReaddir.mockResolvedValue([
+      "frame_0001.jpg",
+      "frame_0002.jpg",
+    ] as unknown as Awaited<ReturnType<typeof readdir>>);
+
+    await expect(
+      extractFrames({
+        videoPath: "/tmp/video.mp4",
+        outputDir: "/output/frames",
+        fps: 5,
+        preset: { width: 1024, format: "jpeg", quality: 80 },
+      }),
+    ).rejects.toThrow("printed 1 frame times for 2 frames");
   });
 
   it("reports each frame's printed time, on the source's own clock", async () => {
@@ -330,6 +360,7 @@ describe("extractFrames", () => {
     it("runs once when the seek landed at or before the start", async () => {
       mockExec.mockImplementation(async (_cmd, _args, opts) => {
         printDecoded(opts, 99.9);
+        printKept(opts, 0, 100);
         return { stdout: "", stderr: "" };
       });
       mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
@@ -379,6 +410,7 @@ describe("extractFrames", () => {
     it("reads a byte-seeking container from a margin before the start", async () => {
       mockExec.mockImplementation(async (_cmd, _args, opts) => {
         printDecoded(opts, 97);
+        printKept(opts, 0, 100);
         return { stdout: "", stderr: "" };
       });
       mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
@@ -391,7 +423,10 @@ describe("extractFrames", () => {
     });
 
     it("never seeks in a raw stream, which has no timestamps to seek on", async () => {
-      mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+      mockExec.mockImplementation(async (_cmd, _args, opts) => {
+        printFrames(opts, 1);
+        return { stdout: "", stderr: "" };
+      });
       mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
         ReturnType<typeof readdir>
       >);
@@ -402,7 +437,10 @@ describe("extractFrames", () => {
     });
 
     it("falls back to reading from the start after the last margin", async () => {
-      mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+      mockExec.mockImplementation(async (_cmd, args, opts) => {
+        if (!args.includes("-ss")) printFrames(opts, 1);
+        return { stdout: "", stderr: "" };
+      });
       mockReaddir.mockResolvedValue(["frame_0001.jpg"] as unknown as Awaited<
         ReturnType<typeof readdir>
       >);
@@ -429,7 +467,10 @@ describe("extractFrames", () => {
   });
 
   it("filters and sorts frame files", async () => {
-    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+    mockExec.mockImplementation(async (_cmd, _args, opts) => {
+      printFrames(opts, 3);
+      return { stdout: "", stderr: "" };
+    });
 
     mockReaddir.mockResolvedValue([
       "frame_0003.jpg",

@@ -19,6 +19,8 @@ interface CleanupOptions {
   onJobRemoved?: (jobId: string) => void;
   /** Jobs with work queued or running are left alone, whatever job.json says. */
   isBusy?: (jobId: string) => boolean;
+  /** Temp files have no owner to check, so they wait until nothing is running. */
+  hasWork?: () => boolean;
 }
 
 export class CleanupScheduler {
@@ -28,6 +30,7 @@ export class CleanupScheduler {
   private readonly logger: MinimalLogger;
   private readonly onJobRemoved: ((jobId: string) => void) | undefined;
   private readonly isBusy: ((jobId: string) => boolean) | undefined;
+  private readonly hasWork: (() => boolean) | undefined;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(opts: CleanupOptions) {
@@ -37,6 +40,7 @@ export class CleanupScheduler {
     this.logger = opts.logger;
     this.onJobRemoved = opts.onJobRemoved;
     this.isBusy = opts.isBusy;
+    this.hasWork = opts.hasWork;
   }
 
   start(): void {
@@ -181,6 +185,8 @@ export class CleanupScheduler {
   }
 
   private async sweepTempFiles(now: number): Promise<number> {
+    if (this.hasWork?.()) return 0;
+
     let tempEntries: string[];
     try {
       tempEntries = await readdir(tmpdir());

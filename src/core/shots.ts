@@ -398,5 +398,12 @@ export async function extractShotFrames(
     if (outcome.status === "rejected") throw outcome.reason;
   }
 
-  return results.filter((frame): frame is ShotFrame => frame !== null);
+  const captured = results.filter((frame): frame is ShotFrame => frame !== null);
+
+  // Detection just decoded these shots, so nothing at all means a failure, not a gap.
+  if (opts.targets.length > 0 && captured.length === 0) {
+    throw new ProcessingError("Shot frame extraction failed: no frame could be read");
+  }
+
+  return captured;
 }

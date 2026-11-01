@@ -22,6 +22,12 @@ function hang(ctx: JobContext): Promise<never> {
   });
 }
 
+function hangUntilAborted(signal: AbortSignal): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
+  });
+}
+
 async function waitFor(check: () => boolean, ms = 3000): Promise<void> {
   const start = Date.now();
   while (!check()) {
@@ -461,7 +467,64 @@ describe("JobManager lifecycle", () => {
     }
   });
 
+  // A file where the job's folder should be makes every write to the job fail.
+  async function breakJobDir(jobId: string): Promise<void> {
+    await rm(join(dir, jobId), { recursive: true });
+    await writeFile(join(dir, jobId), "");
+  }
+
+  // Regression: an async upload's file stayed in tmpdir until the TTL sweep.
+  it("runs the skip cleanup when a job fails before its task starts", async () => {
+    const manager = createManager();
+    const job = await manager.createJob("cap_00000030", { type: "extract" });
+    await breakJobDir(job.id);
+
+    const task = vi.fn(async () => "never");
+    const onSkipped = vi.fn(async () => {});
+
+    await expect(manager.runSync(job.id, task, onSkipped)).rejects.toBeDefined();
+
+    expect(task).not.toHaveBeenCalled();
+    expect(onSkipped).toHaveBeenCalledOnce();
+  });
+
+  it("reports work with no job record as work", async () => {
+    const manager = createManager();
+    expect(manager.hasWork()).toBe(false);
+
+    const controller = new AbortController();
+    const running = manager
+      .runTransient(hangUntilAborted, controller.signal)
+      .catch(() => {});
+    await waitFor(() => manager.hasWork());
+
+    controller.abort();
+    await running;
+    expect(manager.hasWork()).toBe(false);
+  });
+
   describe("reopen", () => {
+    // Regression: the job stayed "pending" with nothing queued, until a restart.
+    it("stays as it was when the reopen cannot be recorded", async () => {
+      const manager = createManager();
+      const job = await manager.createJob("cap_00000031", { type: "extract" });
+      await manager.runSync(job.id, async () => ({ frames: 3 }));
+      const completedAt = job.completed_at;
+      await breakJobDir(job.id);
+
+      await expect(
+        manager.reopenJob(job.id, { type: "combined" }),
+      ).rejects.toBeDefined();
+
+      expect(job).toMatchObject({
+        status: "completed",
+        type: "extract",
+        completed_at: completedAt,
+        reopened_from: null,
+      });
+      expect(manager.isBusy(job.id)).toBe(false);
+    });
+
     it("returns to its earlier standing when the new work fails", async () => {
       const manager = createManager();
       const job = await manager.createJob("cap_0000001d", { type: "extract" });

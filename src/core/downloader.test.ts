@@ -192,6 +192,18 @@ describe("listVideoFormats", () => {
   });
 });
 
+describe("listVideoFormats headers", () => {
+  it("passes headers to yt-dlp", async () => {
+    mockExec.mockClear();
+    mockExec.mockResolvedValue({ stdout: "{}", stderr: "" });
+
+    await listVideoFormats("https://example.com/v", { Referer: "https://example.com/" });
+
+    const args = mockExec.mock.calls[0]![1] as string[];
+    expect(args.join(" ")).toContain("--add-header Referer:https://example.com/");
+  });
+});
+
 // ─── downloadVideoWithFormat ────────────────────────────────────────
 
 describe("downloadVideoWithFormat", () => {
@@ -222,6 +234,25 @@ describe("downloadVideoWithFormat", () => {
     expect(result.filename).toBe("My Video.mp4");
     expect(result.filesize).toBe(12345678);
     expect(result.ext).toBe("mp4");
+  });
+
+  // Regression: headers reached HLS sources only, and yt-dlp went in anonymous.
+  it("passes headers to yt-dlp", async () => {
+    mockExec.mockResolvedValue({ stdout: "", stderr: "" });
+    mockReaddir.mockResolvedValue(["video.mp4"] as unknown as never);
+    mockStat.mockResolvedValue({ size: 100 } as never);
+
+    await downloadVideoWithFormat({
+      url: "https://example.com/v",
+      outputDir: "/data/jobs/cap_0000beef/video",
+      headers: { Referer: "https://example.com/", Cookie: "a=b" },
+    });
+
+    const args = mockExec.mock.calls[0]![1] as string[];
+    expect(args.join(" ")).toContain(
+      "--add-header Referer:https://example.com/ --add-header Cookie:a=b",
+    );
+    expect(args.indexOf("--add-header")).toBeLessThan(args.indexOf("--"));
   });
 
   it("uses defaults when no formatSelector or mergeFormat provided", async () => {

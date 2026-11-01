@@ -2599,6 +2599,7 @@ curl -X POST http://localhost:3000/api/v1/shots \
 
 - **Audio lead on MPEG-TS and MPEG-PS.** With audio that starts before the video, frame times run early against audio by that lead, usually about 20 ms.
 - **AVI with B-frames.** Frames are labeled one frame late, because AVI stores no timestamps for them.
+- **Joined MPEG-TS with a timestamp reset.** When timestamps restart partway through, as in byte-joined captures, the file reports only its first segment's length. Extract still reads every frame, but shots, ranges and `MAX_VIDEO_DURATION` stop at the reported length, and later shots are missing with no error.
 - **Few keyframes.** A source with very few keyframes costs a longer decode for each ranged read.
 - **Containers outside the allowlist.** GIF, Y4M, NUT, RealMedia, MJPEG and OBU, among others, are refused. See [Supported Containers](#supported-containers).
 - **First compose with overlays.** The first one on a machine can take several seconds while fonts load. After that it takes under a second.

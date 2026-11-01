@@ -74,6 +74,10 @@ film-length work. Several defaults change, so read **Changed** before upgrading.
 - Job files are written atomically, and a delete that stops partway finishes on
   the next sweep.
 - Stdio exits when its client goes away, stopping any running job.
+- A link into the Web UI opens the page. Every URL but the root was a `500`.
+- `headers` reach yt-dlp as well as HLS sources, so protected pages can be listed
+  and downloaded.
+- Overlay times on a job with no manifest need `fps`, rather than using 1 fps.
 - Dependency updates, including Sharp 0.35 and archiver 8.
 
 ### Security

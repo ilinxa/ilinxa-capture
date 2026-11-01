@@ -162,6 +162,13 @@ function hlsPlaylistToVideoFormatInfo(playlist: HlsPlaylistInfo): VideoFormatInf
  * List available download formats for a video URL.
  * Routes .m3u8 URLs to HLS parser; others go through yt-dlp.
  */
+function headerArgs(headers?: Record<string, string>): string[] {
+  return Object.entries(headers ?? {}).flatMap(([name, value]) => [
+    "--add-header",
+    `${name}:${value}`,
+  ]);
+}
+
 export async function listVideoFormats(
   url: string,
   headers?: Record<string, string>,
@@ -176,7 +183,7 @@ export async function listVideoFormats(
   try {
     const result = await execFileAsync(
       "yt-dlp",
-      ["--dump-json", "--no-playlist", "--", url],
+      ["--dump-json", "--no-playlist", ...headerArgs(headers), "--", url],
       { maxBuffer: 10 * 1024 * 1024, signal },
     );
     stdout = result.stdout;
@@ -270,7 +277,12 @@ export async function downloadVideoWithFormat(
   const outputTemplate = join(outputDir, "%(title)s.%(ext)s");
 
   const isAudioFormat = mergeFormat === "mp3";
-  const args = ["-o", outputTemplate, "-f", formatSelector, "--no-playlist"];
+  const args = [
+    "-o", outputTemplate,
+    "-f", formatSelector,
+    "--no-playlist",
+    ...headerArgs(headers),
+  ];
   if (isAudioFormat) {
     args.push("--extract-audio", "--audio-format", mergeFormat);
   } else {

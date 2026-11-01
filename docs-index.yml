@@ -103,6 +103,7 @@ docs:
 #                  demo.gif (README), demo.mp4 (16:9 social), demo-vertical.mp4 (9:16 Shorts)
 
 log:
+  - "2026-11-02 0.2.0 guide known limits: joined TS; changelog.0-2-0 final fixes"
   - "2026-11-01 0.2.0 guide all blocks rewritten for 0.2.0; 12 MCP tools"
   - "2026-11-01 0.2.0 readme features usage config security faq updated"
   - "2026-11-01 0.2.0 changelog.0-2-0 added; breaking defaults listed"

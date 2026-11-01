@@ -30,6 +30,7 @@ async function main(): Promise<void> {
     logger,
     onJobRemoved: (jobId) => jobManager.forgetJob(jobId),
     isBusy: (jobId) => jobManager.isBusy(jobId),
+    hasWork: () => jobManager.hasWork(),
   });
   cleanupScheduler.start();
 

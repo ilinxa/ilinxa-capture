@@ -233,7 +233,7 @@ export class CaptureService {
   /** Metadata for a path or URL. A URL is a full download, so it queues like a job. */
   async probe(source: string, caller?: AbortSignal): Promise<VideoMetadata> {
     const input = await this.resolveSource(source);
-    if (input.kind !== "url") return this.probeFile(input.path);
+    if (input.kind !== "url") return this.probeFile(input.path, caller);
 
     return this.jobs.runTransient(async (signal) => {
       const path = await downloadVideo(input.url, { signal });
@@ -248,8 +248,11 @@ export class CaptureService {
   }
 
   /** Metadata for a file this server already holds, such as an upload. */
-  async probeFile(path: string): Promise<VideoMetadata> {
-    return getVideoMetadata(path, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+  async probeFile(path: string, caller?: AbortSignal): Promise<VideoMetadata> {
+    const timeout = AbortSignal.timeout(PROBE_TIMEOUT_MS);
+    return getVideoMetadata(path, {
+      signal: caller ? AbortSignal.any([timeout, caller]) : timeout,
+    });
   }
 
   async extract(
@@ -545,6 +548,12 @@ export class CaptureService {
       }
 
       const source = await this.loadJobFrames(job);
+      if (options.overlay_timestamp && !fps && !source.labels) {
+        throw new ValidationError(
+          "'fps' is required when 'overlay_timestamp' is enabled on a job with no manifest",
+        );
+      }
+
       await this.jobs.reopenJob(inputJobId, {
         type: job.type === "extract" ? "combined" : job.type,
         webhookUrl: run.webhookUrl,

@@ -85,11 +85,26 @@ describe("extractShotFrames workers", () => {
   });
 
   it("treats a failure with no frame as no frame, not a failed job", async () => {
-    mockExec.mockRejectedValue(new Error("encoder failed: no frames"));
+    mockExec.mockImplementation(async (_cmd, args, opts) => {
+      const target = trimTarget(args);
+      if (target < 1_000_000) throw new Error("encoder failed: no frames");
+      printAt(opts, target, target);
+      return { stdout: "", stderr: "" };
+    });
 
     const frames = await extractShotFrames({ ...options, targets: targets.slice(0, 2) });
 
-    expect(frames).toEqual([]);
+    expect(frames.map((frame) => frame.shot)).toEqual([2]);
+  });
+
+  // Regression: a source gone since detection finished as a completed job with
+  // shots and no frames.
+  it("fails the job when no frame at all could be read", async () => {
+    mockExec.mockRejectedValue(new Error("No such file or directory"));
+
+    await expect(
+      extractShotFrames({ ...options, targets: targets.slice(0, 2) }),
+    ).rejects.toThrow("no frame could be read");
   });
 
   it("seeks again for the shot's last frame if a seek lands past it", async () => {
@@ -120,10 +135,13 @@ describe("extractShotFrames workers", () => {
     const frames = await extractShotFrames({
       ...options,
       frameInterval: 0.04,
-      targets: [{ shot: 1, position: "middle", time: 2, latest: 3 }],
+      targets: [
+        { shot: 1, position: "middle", time: 2, latest: 3 },
+        { shot: 2, position: "middle", time: 9, latest: 10 },
+      ],
     });
 
-    expect(frames).toEqual([]);
+    expect(frames.map((frame) => frame.shot)).toEqual([2]);
     expect(rm).toHaveBeenCalledTimes(1);
   });
 

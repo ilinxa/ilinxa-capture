@@ -337,6 +337,30 @@ describe("CleanupScheduler", () => {
       );
     });
 
+    // Regression: an upload waiting on a long job aged out and was deleted under it.
+    it("leaves temp files alone while any work is queued or running", async () => {
+      mockReaddir.mockImplementation((path: unknown) =>
+        Promise.resolve(
+          (path === tmpdir() ? ["ilinxa-capture-upload-1.mp4"] : []) as unknown as Awaited<
+            ReturnType<typeof readdir>
+          >,
+        ),
+      );
+      mockStat.mockResolvedValue({
+        mtimeMs: Date.now() - 7200_000,
+      } as unknown as Awaited<ReturnType<typeof stat>>);
+
+      const scheduler = new CleanupScheduler({
+        outputDir: "/data/jobs",
+        ttlSeconds: 3600,
+        logger,
+        hasWork: () => true,
+      });
+      await scheduler.sweep();
+
+      expect(mockRm).not.toHaveBeenCalled();
+    });
+
     it("does not remove a fresh ilinxa-capture- temp file", async () => {
       const freshTime = Date.now() - 1000; // 1s ago
       mockReaddir.mockImplementation((path: unknown) => {

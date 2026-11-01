@@ -135,7 +135,6 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
       root: uiDir,
       prefix: "/",
       wildcard: false,
-      decorateReply: false,
     });
 
     // SPA fallback — serve index.html for client routes, JSON 404 for API/MCP

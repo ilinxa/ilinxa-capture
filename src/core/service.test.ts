@@ -5,7 +5,7 @@ vi.mock("./safe-fs.js", async (importOriginal) => {
   return { ...original, replaceDir: vi.fn(original.replaceDir) };
 });
 
-import { access, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
@@ -59,6 +59,28 @@ describe("CaptureService", () => {
       overlay_frame_number: false,
       overlay_timestamp: false,
     }) as ComposeOptions;
+
+  // Regression: a raw stream decodes in full to measure, on after the caller left.
+  it("stops probing a local file when the caller goes", async () => {
+    const path = join(dir, "clip.mp4");
+    await writeFile(path, "");
+    const reason = new Error("caller left");
+
+    await expect(service.probe(path, AbortSignal.abort(reason))).rejects.toBe(reason);
+  });
+
+  // Regression: labels fell back to 1 fps, so every overlay was silently wrong.
+  it("refuses overlay times on a job with no manifest, unless given fps", async () => {
+    const id = await frameJob();
+    const overlaid = { ...compose(id), overlay_timestamp: true };
+
+    await expect(service.compose(overlaid)).rejects.toMatchObject({
+      code: "VALIDATION_ERROR",
+    });
+    expect(jobs.getJob(id).status).toBe("completed");
+
+    await expect(service.compose({ ...overlaid, fps: 12 })).resolves.toBeDefined();
+  });
 
   describe("swapping new sheets in", () => {
     // Regression: the job said completed and listed sheets that were gone.

@@ -208,6 +208,8 @@ export class JobManager {
       throw new JobBusyError(jobId);
     }
 
+    const before = { ...job };
+
     job.reopened_from = {
       type: job.type,
       status: job.status,
@@ -225,7 +227,13 @@ export class JobManager {
     job.error_code = null;
     job.progress = null;
 
-    await this.persistJob(job);
+    try {
+      await this.persistJob(job);
+    } catch (err) {
+      // Nothing is queued for it, so "pending" would be a state it never leaves.
+      Object.assign(job, before);
+      throw err;
+    }
     return job;
   }
 
@@ -279,6 +287,12 @@ export class JobManager {
   isBusy(jobId: string): boolean {
     const status = this.jobs.get(jobId)?.status;
     return status === "pending" || status === "processing";
+  }
+
+  /** Whether anything is queued or running, including work with no job record. */
+  hasWork(): boolean {
+    if (this.active.size > 0) return true;
+    return [...this.jobs.keys()].some((jobId) => this.isBusy(jobId));
   }
 
   /** Drop a job whose directory is already gone, as after a cleanup sweep. */
@@ -380,6 +394,7 @@ export class JobManager {
     const { controller, finish } = this.track(jobId);
 
     const startTime = Date.now();
+    let started = false;
     try {
       job.status = "processing";
       job.started_at = new Date().toISOString();
@@ -388,6 +403,7 @@ export class JobManager {
       // An abort during that write fired before the task could be listening.
       controller.signal.throwIfAborted();
 
+      started = true;
       const taskResult = await task({
         jobId,
         signal: controller.signal,
@@ -405,6 +421,8 @@ export class JobManager {
       await this.persistIfTracked(job);
       return taskResult;
     } catch (err) {
+      if (!started) await onSkipped?.().catch(() => {});
+
       // Core modules wrap process errors; the abort reason is the real cause.
       const failure: unknown = controller.signal.aborted
         ? controller.signal.reason

@@ -35,6 +35,31 @@ describe("hardening (real ffmpeg, sharp, disk and HTTP)", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
+  // Regression: every URL but the root was a 500, so a link into the UI failed.
+  describe("serving the Web UI", () => {
+    let server: TestServer;
+
+    beforeAll(async () => {
+      const ui = join(dir, "ui");
+      await mkdir(ui);
+      await writeFile(join(ui, "index.html"), "<title>MARKER-ui</title>");
+      server = await startServer({ LOCAL_OUTPUT_DIR: jobs, UI_DIR: ui });
+    });
+    afterAll(() => server.close());
+
+    it("answers a client route with the page", async () => {
+      const res = await fetch(`${server.baseUrl}/some/client/route`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain("MARKER-ui");
+    });
+
+    it("still answers an unknown API route with JSON", async () => {
+      const res = await fetch(`${server.baseUrl}/api/v1/nothing-here`);
+      expect(res.status).toBe(404);
+      expect((await res.json()).error.code).toBe("NOT_FOUND");
+    });
+  });
+
   describe("default local path policy", () => {
     let server: TestServer;
 
