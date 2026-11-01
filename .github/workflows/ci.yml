@@ -49,6 +49,20 @@ jobs:
           npm install ./ilinxa-capture-*.tgz
           node node_modules/ilinxa-capture/dist/mcp-entry.js < /dev/null
 
+  # Frame timing differs between FFmpeg versions, so the oldest one supported
+  # gets the full suite too. Debian 12 ships 5.1, which is also what the image uses.
+  minimum-ffmpeg:
+    runs-on: ubuntu-latest
+    container: node:22-bookworm-slim
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y ffmpeg python3-pip
+      - run: pip3 install --break-system-packages yt-dlp
+      - run: ffmpeg -version | head -1
+      - run: npm ci
+      - run: npm test -- --run
+      - run: npm run test:integration -- --run
+
   docker:
     runs-on: ubuntu-latest
     steps:
