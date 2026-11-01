@@ -8,7 +8,11 @@ on:
 
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -17,12 +21,42 @@ jobs:
           node-version: 22
           cache: npm
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - run: npm ci
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+
+      - run: pip install yt-dlp
       - run: npm run typecheck
       - run: npm test -- --run
       - run: npm run test:integration -- --run
       - run: npm run build
+      - run: npm pack --dry-run
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ilinxa-capture .
+      - name: Boots, answers on loopback, and refuses a foreign Host
+        run: |
+          docker run -d --name capture -p 127.0.0.1:3000:3000 ilinxa-capture
+          for i in $(seq 1 30); do
+            curl -fs http://localhost:3000/api/v1/health && break
+            sleep 1
+          done
+          curl -fs http://localhost:3000/api/v1/health
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: attacker.example' http://localhost:3000/api/v1/health)" = 403
+          test "$(docker exec capture id -u)" != 0
 
   ui:
     runs-on: ubuntu-latest

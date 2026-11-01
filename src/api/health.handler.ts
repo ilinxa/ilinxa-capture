@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { VERSION } from "../version.js";
 
 export const healthResponseSchema = z.object({
   status: z.literal("ok"),
@@ -16,7 +17,7 @@ export async function healthCheckHandler(
 ): Promise<void> {
   const response: HealthResponse = {
     status: "ok",
-    version: "0.1.1",
+    version: VERSION,
     uptime: process.uptime(),
     environment: process.env["NODE_ENV"] ?? "development",
   };

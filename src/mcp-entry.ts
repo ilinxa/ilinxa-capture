@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import pino from "pino";
 import { homedir } from "node:os";
 import { join } from "node:path";

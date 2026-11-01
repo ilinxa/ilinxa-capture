@@ -1,4 +1,4 @@
-import archiver from "archiver";
+import { ZipArchive } from "archiver";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { JobManager } from "../core/job-manager.js";
 import type { Storage } from "../core/storage.js";
@@ -29,7 +29,7 @@ export function createDownloadHandler(jobManager: JobManager, storage: Storage) 
     }
 
     // Create ZIP archive with fast compression (images already compressed)
-    const archive = archiver("zip", { zlib: { level: 1 } });
+    const archive = new ZipArchive({ zlib: { level: 1 } });
 
     for (const file of files) {
       archive.append(storage.getFileStream(jobId, file.relativePath), {

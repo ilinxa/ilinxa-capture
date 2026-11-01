@@ -1,4 +1,4 @@
-import sharp from "sharp";
+import sharp, { type Metadata, type OverlayOptions } from "sharp";
 import { copyFile } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -144,7 +144,7 @@ function chunk<T>(arr: T[], size: number): T[][] {
  */
 async function inspectFrames(files: string[]): Promise<FrameInfo[]> {
   const inspect = async (path: string, index: number): Promise<FrameInfo> => {
-    let meta: sharp.Metadata;
+    let meta: Metadata;
     try {
       meta = await sharp(path).metadata();
     } catch {
@@ -250,7 +250,7 @@ export async function composeGrid(
         const canvasWidth = cols * cell.width;
         const canvasHeight = rows * cell.height;
 
-        const compositeInputs: sharp.OverlayOptions[] = [];
+        const compositeInputs: OverlayOptions[] = [];
 
         for (let i = 0; i < sheetFrames.length; i++) {
           const frame = sheetFrames[i]!;

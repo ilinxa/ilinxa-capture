@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import { VERSION } from "../version.js";
 import { registerTools } from "./tools.js";
 import type { ToolDeps } from "./tools.js";
 
@@ -19,7 +20,7 @@ interface SessionEntry {
 export function createMcpServer(deps: ToolDeps): McpServer {
   const server = new McpServer({
     name: "ilinxa-capture",
-    version: "0.1.1",
+    version: VERSION,
   });
   registerTools(server, deps);
   return server;
